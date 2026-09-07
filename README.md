@@ -6,14 +6,16 @@ macOS 原生图片查看器 · Swift 6 + SwiftUI(混合 AppKit) · 零第三方�
 
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue) ![Swift 6](https://img.shields.io/badge/Swift-6-orange) ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
-## ✨ v0.1.0 亮点
+**下载：** [Releases](https://github.com/dongsheng512/PureView/releases/latest) 取 `PureView-0.7.7.zip` 或 `.dmg`（macOS 14+）。源码自行构建见下方。
 
-- **磨砂侧栏 + 纯净顶栏**：侧栏与顶栏左侧共享 `NSVisualEffectView(.sidebar)` 磨砂，右侧与主区柔白 `#FAFAFB` 同色系，无黑线/无透明缝
-- **可拖中线**：侧栏右缘 `1px 0.07` 细线 + `16pt 居中热区`，`↔` 光标，`180–400pt` 实时拖动并持久到 `UserDefaults`
-- **原生红绿灯**：自绘 `12px` 圆点，悬停整组同显 `× − ⤢`（对角双箭头），激活彩色/失焦灰
-- **顶栏重排**：移除刷新，`添加文件夹` 移至右侧按钮组最左，`详情` 移至 `打印` 右侧
-- **柔和配色**：画布 `light` 改柔和米白，欢迎页与状态栏同 `headerView` 磨砂，浅色下不刺眼
-- **稳定性**：缩略图/主图缓存精确计费 + `utility` 队列 + 切盘 `cancelAll`，1000 张 <500MB 设计落地
+## ✨ 亮点（v0.7.7）
+
+- **文件夹快翻**：多根侧栏 + 缩略图网格 + 触控板横滑切图，1000 张目标内存 < 500MB
+- **完整 EXIF**：右侧信息抽屉（文件 / 图像 / 拍摄 / GPS），可折叠、一键复制
+- **统一编辑**：裁切、文字、画笔（实线/荧光）、形状（矩形/椭圆/直线/箭头）、马赛克、橡皮同一工具条；导出 PNG/JPEG/HEIC/TIFF，默认可另存
+- **原生体验**：磨砂侧栏、自绘红绿灯、可拖中线、正经打印（`NSPrintOperation`）
+- **格式广度**：ImageIO 原生 61 种可解码（含 HEIC / WebP / AVIF / JXL / 全系 RAW）
+- **图标**：深色渐变底 + 白色几何雪山 + 暖橙日（矢量绘制，任意尺寸锐利）
 
 ## 功能
 
@@ -48,6 +50,8 @@ macOS 原生图片查看器 · Swift 6 + SwiftUI(混合 AppKit) · 零第三方�
 | `⌘R` | 刷新当前文件夹 |
 
 ## 构建与运行
+
+预编译包：见 [GitHub Releases](https://github.com/dongsheng512/PureView/releases/latest)。
 
 ```bash
 ./build.sh            # release 构建 + 组装 PureView.app（ad-hoc 签名）
