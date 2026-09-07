@@ -1,7 +1,7 @@
 # 标记功能执行规格(给实现 agent)
 
 > 状态:A1–A4 已落地,as-built 以仓库现有文件为准(2026-09-01,v0.4.1)。
-> 本文件是文字标记 / 水印 / 画笔 / 马赛克的**规格与偏差说明**。总体项目规格见 `PLAN.md` + `AGENTS.md`。
+> 本文件是文字标记 / 水印 / 画笔 / 马赛克的**规格与偏差说明**。总体项目规格见 `PLAN.md` + `AGENTS.md`。形状重塑 / 自定义颜色等后续项见 `NEXT_PLAN.md`(C1–C4),不要写进本文。
 > **不要**把本文的期号写成 `PLAN.md` 的 M1–M6。本文期号一律 **A1–A4**。
 > **不要**再创建 `Annotation.swift` / `AnnotationMath.swift` / `WatermarkSpec.swift`——实现用的是下面 as-built 路径。
 

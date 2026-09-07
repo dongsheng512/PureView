@@ -10,9 +10,6 @@ struct MainContentView: View {
     @State private var isPreparingPrint = false
     @State private var showZoomMenu = false
     @State private var isDropTargeted = false
-    // 信息面板开合动画期间冻结画布重排(真值只维持动画时长,解除后补一次布局)
-    @State private var suppressCanvasLayout = false
-    @State private var layoutFreezeGeneration = 0
     @State private var sidebarWidth: CGFloat = UserDefaults.standard.double(forKey: "sidebarWidth") > 0 ? UserDefaults.standard.double(forKey: "sidebarWidth") : 260
     @State private var dragStartWidth: CGFloat = 260
     @State private var isHoveringDivider = false
@@ -315,7 +312,6 @@ struct MainContentView: View {
                     onImageInfo: { store.displayInfo = $0 },
                     onRotationChange: { store.isDisplayRotated = $0 },
                     onStep: { store.step($0) },
-                    relayoutSuppressed: suppressCanvasLayout
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contextMenu {
@@ -357,20 +353,15 @@ struct MainContentView: View {
                 }
                 }
 
-                infoDrawer
-            }
-            .animation(.easeOut(duration: 0.25), value: store.showInspector)
-            .onChange(of: store.showInspector) { _, _ in
-                // 开合动画期间冻结画布重排:否则 handleLayout 每帧重新 fit,
-                // 图片被连续缩放(挤压生硬感的根源);动画结束后一次性重排。
-                layoutFreezeGeneration += 1
-                let gen = layoutFreezeGeneration
-                suppressCanvasLayout = true
-                Task {
-                    try? await Task.sleep(for: .milliseconds(320))
-                    if gen == layoutFreezeGeneration { suppressCanvasLayout = false }
+                if store.showInspector {
+                    InfoInspector(file: store.currentImage)
+                        .frame(width: 280)
+                        .frame(maxHeight: .infinity)
+                        .transition(.move(edge: .trailing))
                 }
             }
+            // 只绑 showInspector,画布随分区宽度连续重排
+            .animation(.easeInOut(duration: 0.22), value: store.showInspector)
             if !store.isImmersive {
                 statusBar
             }
@@ -390,20 +381,6 @@ struct MainContentView: View {
                 .transition(.opacity)
             }
         }
-    }
-
-    /// 挤压式信息面板:内容定宽 280,容器宽度 0↔280 动画,展开过程裁切,
-    /// 面板内部不变形;同色无边无投影,是窗口的一块分区而不是浮层
-    private var infoDrawer: some View {
-        ZStack {
-            if store.showInspector {
-                InfoInspector(file: store.currentImage)
-                    .frame(width: 280)
-            }
-        }
-        .frame(maxHeight: .infinity)
-        .frame(width: store.showInspector ? 280 : 0, alignment: .leading)
-        .clipped()
     }
 
     private var welcomeOverlay: some View {

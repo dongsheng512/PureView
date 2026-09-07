@@ -25,9 +25,6 @@ struct ImageViewCanvas: NSViewRepresentable {
     /// 当前显示位图是否已被用户旋转。旋转是纯显示态,切图即丢,需要让界面如实告知。
     var onRotationChange: (Bool) -> Void
     var onStep: (Int) -> Void
-    /// 信息面板开合动画期间为真:冻结布局重排,避免 fit 每帧重算导致图片连续形变;
-    /// 解除时补一次布局。纯净模式无面板,恒为 false。
-    var relayoutSuppressed: Bool = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -40,7 +37,6 @@ struct ImageViewCanvas: NSViewRepresentable {
         coordinator.parent = self
         coordinator.applyFile(file)
         coordinator.applyBackground(background)
-        coordinator.setRelayoutSuppressed(relayoutSuppressed)
         if let request = zoomRequest, request.token != coordinator.appliedZoomToken {
             coordinator.appliedZoomToken = request.token
             coordinator.performZoom(request.action)
@@ -299,15 +295,6 @@ struct ImageViewCanvas: NSViewRepresentable {
         /// 不判等的话 clipView 的 didSet 会让画布每帧全量重绘(平滑缩放时尤其明显)。
         private var appliedBackground: CanvasBackground?
 
-        /// 布局冻结(信息面板开合动画期间)。解除瞬间补一次布局:
-        /// 此时面板宽度已到位,fit/夹取按最终尺寸一步到位,而不是动画期间每帧重算。
-        private var relayoutSuppressed = false
-        func setRelayoutSuppressed(_ suppressed: Bool) {
-            guard suppressed != relayoutSuppressed else { return }
-            relayoutSuppressed = suppressed
-            if !suppressed { handleLayout() }
-        }
-
         /// 应用画布背景;图片层保持透明以便 PNG 透出背景
         func applyBackground(_ background: CanvasBackground) {
             guard appliedBackground != background else { return }
@@ -505,7 +492,6 @@ struct ImageViewCanvas: NSViewRepresentable {
         }
 
         private func handleLayout() {
-            guard !relayoutSuppressed else { return }
             guard !mutatingCanvas, imageView.image != nil else { return }
             // 捏合手势进行中(bounds 尺寸被 magnification 改变),不干预布局
             guard abs(scrollView.magnification - 1) < 0.001 else { return }
