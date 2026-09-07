@@ -36,7 +36,7 @@
    - 迭代:`swift build`
    - 单测:`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`
    - 单条:`… swift test --filter AnnotationMathTests`
-6. 每期结束必须:`swift test` 全绿 + 升 `build.sh` 里 `CFBundleShortVersionString` + `README.md`「版本」小节追加一行 + `./build.sh`(产出 `build/PureView.app`)。
+6. 每期结束必须:`swift test` 全绿 + 升 `build.sh` 里 `CFBundleShortVersionString` + GitHub Release 变更摘要 + `./build.sh`(产出 `build/PureView.app`)。不要往 `README.md` 写版本号。
 7. 注释:短、事实、只解释非显然约束。禁止用注释叙述「我做了什么」。禁止为未做的期写占位 TODO 实现。
 8. 范围:只做当前期。A1 不得实现画笔/马赛克 UI。枚举里可以留 `stroke`/`mosaic` 关联值,但 A1 不得构造它们。
 9. UI 文案用中文(与现有 CropView / 菜单一致)。
@@ -617,20 +617,9 @@ Sheet 内:
 
 ---
 
-## 10. 版本与 README
+## 10. 版本
 
-改 `build.sh` 中:
-
-```xml
-<key>CFBundleShortVersionString</key><string>0.4.0</string>
-```
-
-`README.md`:
-
-- 标题 `# PureView v0.4.0`
-- 「版本」列表顶部追加一行,例如:
-  - `v0.4.0` — 文字标记:独立 sheet,点放/拖动/删除/撤销,6 色 3 档,烙印导出(不写回原图)
-- 「功能」或「结构」可补 `Annotation.swift` / `MarkupView.swift` 一行,保持简短
+改 `build.sh` 里的 `CFBundleShortVersionString`。变更摘要写 GitHub Release。`README.md` 不写版本号、不维护 changelog。
 
 结构目录若更新,与现有树风格一致(见 README 现树)。
 
@@ -686,4 +675,4 @@ A1–A4 已在 v0.4.0 落地,v0.4.1 修了命中盒/水印坐标/会话缓存等
 1. 只改 as-built 表里的路径。
 2. 文字命中必须走 `MarkupGeometry.textHitRect`(归一化)。禁止把 `textSize` 像素尺寸直接塞进以 0...1 为原点的 `CGRect`。
 3. 水印必须先把 CG 上下文翻成 y 向下,再按 `WatermarkLayout.origin` 摆;文字进 `drawText` 前换成归一化点。
-4. 改纯函数就补 `Tests/PictoolTests/PictoolTests.swift`。功能合入升 `build.sh` 版本并写 README「版本」一行。
+4. 改纯函数就补 `Tests/PictoolTests/PictoolTests.swift`。功能合入升 `build.sh` 版本并写 GitHub Release 摘要,不要往 `README.md` 写版本号。

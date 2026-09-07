@@ -6,7 +6,7 @@
 > B4 as-built:`text.sizeFraction`(连续,三档 chip 为预设,`clampTextFraction` 夹取 0.015–0.120)+ 选中框右下角手柄拖拽;荧光笔 = `.stroke(..., style: StrokeStyleKind)`,渲染 alpha 0.45 + `highlighterWidths` 表,H 键切换。
 > 对标交互参考:**macOS 预览(Preview.app)的标记工具栏**——只借鉴交互模型,不看它的代码。
 > 基线:仓库现有统一编辑器 `Sources/Pictool/Views/EditView.swift`(预览.app 式单行工具条 + 归一化标注)。
-> 版本节奏**由用户决定**:每期合入时同步 `build.sh` 的 `CFBundleShortVersionString` + `README.md`「版本」小节,具体号用户说了算。
+> 版本节奏**由用户决定**:每期合入时同步 `build.sh` 的 `CFBundleShortVersionString`;变更摘要写 GitHub Release,不要写进 `README.md`。
 
 ---
 
@@ -251,7 +251,7 @@ enum MarkupColor: Sendable { case palette(Int), custom(r: Double, g: Double, b: 
 
 - `swift build` 0 error;`swift test` 全绿(新增纯函数必须有单测)。
 - 手工自测:见各期「实现要点」里的交互项(缩放锚点、夹取、手柄命中优先级)。
-- 版本号同步(`build.sh`)+ `README.md`「版本」小节一行 + `./build.sh` 打包。
+- 版本号同步(`build.sh`) + GitHub Release 变更摘要 + `./build.sh` 打包。不要往 `README.md` 写版本号。
 - UI 文案中文;`.help` 提示补齐快捷键(如「适应窗口 (⌘0)」)。
 
 ## 9. 代码锚点(避免搜错)

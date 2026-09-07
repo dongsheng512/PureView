@@ -4,7 +4,7 @@
 > 主线已齐:五项浏览需求(M)、标记 A1–A4、编辑器交互 B0–B4 均已落地。后面不加新主线,只补还差一口气的体验,以及 B 期点名后置的能力。
 > 对标交互参考:**macOS 预览(Preview.app)**——只借鉴交互模型,不看它的代码。
 > 基线:统一编辑器 `Sources/Pictool/Views/EditView.swift`;浏览态 `FolderStore` / `SidebarView` / `ThumbnailGridView`。
-> 版本节奏**由用户决定**:每期合入时同步 `build.sh` 的 `CFBundleShortVersionString` + `README.md`「版本」小节。
+> 版本节奏**由用户决定**:每期合入时同步 `build.sh` 的 `CFBundleShortVersionString`;变更摘要写 GitHub Release,不要写进 `README.md`。
 
 ---
 
@@ -217,7 +217,7 @@ enum MarkupColor: Equatable, Sendable {
 
 - `swift build` 0 error;`swift test` 全绿(新增纯函数必须有单测)。
 - 手工自测见各期决策段。
-- 版本号同步(`build.sh`) + `README.md`「版本」一行 + `./build.sh`。
+- 版本号同步(`build.sh`) + GitHub Release 变更摘要 + `./build.sh`。不要往 `README.md` 写版本号。
 - UI 文案中文;手柄 / 最近文件夹菜单补 `.help`。
 
 ## 9. 代码锚点
@@ -242,4 +242,4 @@ enum MarkupColor: Equatable, Sendable {
 1. 读本文第 0 节 + 对应期章节,以及 `EDIT_UX_PLAN.md` 文档头。
 2. C1 不要改 `Annotation.Kind` 关联值;C2 才改颜色。
 3. 改纯函数就补 `Tests/PictoolTests/PictoolTests.swift`。
-4. 合入升版本、写 README「版本」一行、跑 `./build.sh`。
+4. 合入升 `build.sh` 版本、写 GitHub Release 摘要、跑 `./build.sh`。不要往 `README.md` 写版本号。
