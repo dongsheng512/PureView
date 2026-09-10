@@ -101,8 +101,10 @@ struct EditView: View {
     @State private var exporting = false
     @State private var errorMessage: String?
     @State private var format: CropFormat = .png
-    @State private var quality = 0.92
-    @State private var includeGPS = true
+    // 质量与 GPS 开关跨会话记忆。格式**不记**:`CropFormat.default(forSourceExt:)` 按源扩展名
+    // 给的默认值(JPEG 进 JPEG 出)比一个全局记忆更有用,用记忆覆盖它是退步。
+    @AppStorage(ExportQuality.storageKey) private var quality = ExportQuality.defaultValue
+    @AppStorage(ExportGPS.storageKey) private var includeGPS = ExportGPS.defaultValue
     @State private var watermarkDraft = WatermarkSettings()
     @State private var showWatermarkSettings = false
     @State private var showToolPopover = false
@@ -316,6 +318,7 @@ struct EditView: View {
             .popover(isPresented: $showExportPopover, arrowEdge: .bottom) {
                 ExportOptionsForm(
                     format: $format,
+                    quality: $quality,
                     includeGPS: $includeGPS,
                     watermark: $watermarkDraft,
                     exporting: exporting,
@@ -1848,6 +1851,7 @@ private final class ContextActionBox: NSObject {
 /// 导出选项小弹层。选完格式后再弹出系统存储面板只选路径。
 private struct ExportOptionsForm: View {
     @Binding var format: CropFormat
+    @Binding var quality: Double
     @Binding var includeGPS: Bool
     @Binding var watermark: WatermarkSettings
     var exporting: Bool
@@ -1871,6 +1875,20 @@ private struct ExportOptionsForm: View {
                     .controlSize(.small)
                     .labelsHidden()
                     .fixedSize()
+                }
+                // PNG / TIFF 无损,没有质量可言,整行不出现(而不是留个灰控件)
+                if format.isLossy {
+                    HStack(spacing: 8) {
+                        Text("质量")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Slider(value: $quality, in: ExportQuality.range)
+                            .controlSize(.small)
+                        Text(ExportQuality.percentLabel(quality))
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 34, alignment: .trailing)
+                    }
                 }
                 HStack {
                     Text("位置信息")

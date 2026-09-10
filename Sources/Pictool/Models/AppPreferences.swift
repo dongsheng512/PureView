@@ -104,6 +104,28 @@ enum SlideShowInterval: Int, CaseIterable, Identifiable {
     }
 }
 
+/// 导出质量(仅 JPEG / HEIC 这类有损格式生效;PNG/TIFF 无损,面板里不显示滑杆)。
+/// 默认 0.92 沿用改动前的硬编码值——升级后观感不变,只是多了一个可调入口。
+enum ExportQuality {
+    static let storageKey = "exportQuality"
+    static let defaultValue = 0.92
+    /// 下限 0.3:再低就只剩轮廓,不如换 PNG。
+    static let range: ClosedRange<Double> = 0.3...1.0
+
+    /// 显示成整百分数(滑杆右侧读数)。夹取到合法区间并挡掉 NaN——
+    /// UserDefaults 里可能残留旧版本或手改 plist 写进去的越界值。
+    static func percentLabel(_ value: Double) -> String {
+        let v = value.isFinite ? min(max(value, range.lowerBound), range.upperBound) : defaultValue
+        return "\(Int((v * 100).rounded()))%"
+    }
+}
+
+/// 导出是否写入 GPS 坐标。默认开启,与改动前的行为一致。
+enum ExportGPS {
+    static let storageKey = "exportIncludeGPS"
+    static let defaultValue = true
+}
+
 /// 侧栏正上方那一段(红绿灯所在列)的配色
 enum SidebarTopStyle: String, CaseIterable, Identifiable {
     /// 与侧栏同色,整列通到窗口顶,和主区顶栏分开

@@ -2081,3 +2081,31 @@ final class ThumbnailEmbeddedFallbackTests: XCTestCase {
         XCTAssertLessThanOrEqual(longEdge(of: image), 180)
     }
 }
+
+/// B1 导出质量:读数格式化是纯函数,夹取与 NaN 兜底在这里锁住。
+final class ExportQualityTests: XCTestCase {
+
+    func testPercentLabelRoundsToWholePercent() {
+        XCTAssertEqual(ExportQuality.percentLabel(0.92), "92%")
+        XCTAssertEqual(ExportQuality.percentLabel(1.0), "100%")
+        XCTAssertEqual(ExportQuality.percentLabel(0.875), "88%")
+    }
+
+    /// 滑杆自身有区间;这里挡的是 UserDefaults 里被手改或旧版本留下的越界值。
+    func testPercentLabelClampsOutOfRangeValues() {
+        XCTAssertEqual(ExportQuality.percentLabel(0), "30%")
+        XCTAssertEqual(ExportQuality.percentLabel(-5), "30%")
+        XCTAssertEqual(ExportQuality.percentLabel(2), "100%")
+    }
+
+    func testPercentLabelFallsBackToDefaultForNonFinite() {
+        XCTAssertEqual(ExportQuality.percentLabel(.nan), "92%")
+        XCTAssertEqual(ExportQuality.percentLabel(.infinity), "92%")
+    }
+
+    /// 改动前是硬编码 0.92。默认值必须一致,否则老用户升级后导出结果会无声变化。
+    func testDefaultKeepsPreviousHardcodedValue() {
+        XCTAssertEqual(ExportQuality.defaultValue, 0.92)
+        XCTAssertTrue(ExportGPS.defaultValue)
+    }
+}
