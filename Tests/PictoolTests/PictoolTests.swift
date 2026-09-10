@@ -2397,3 +2397,148 @@ final class ContactSheetLayoutTests: XCTestCase {
         XCTAssertFalse(loaded.showFilenames)
     }
 }
+
+/// B4-a 文件夹过滤:匹配语义是纯函数,词序无关、扩展名可搜。
+final class ImageFilterTests: XCTestCase {
+
+    private func files(_ names: [String]) -> [ImageFile] {
+        names.map { ImageFile(id: URL(fileURLWithPath: "/tmp/\($0)")) }
+    }
+
+    func testEmptyQueryMatchesEverything() {
+        XCTAssertTrue(ImageFilter.matches(name: "a.jpg", query: ""))
+        XCTAssertTrue(ImageFilter.matches(name: "a.jpg", query: "   \t "))
+        XCTAssertTrue(ImageFilter.terms(in: "  ").isEmpty)
+    }
+
+    func testTermsSplitOnWhitespace() {
+        XCTAssertEqual(ImageFilter.terms(in: "  A  b\tC "), ["a", "b", "c"])
+    }
+
+    func testMatchesSubstringCaseInsensitively() {
+        XCTAssertTrue(ImageFilter.matches(name: "IMG_0001.JPG", query: "img_"))
+        XCTAssertTrue(ImageFilter.matches(name: "IMG_0001.JPG", query: "0001"))
+        XCTAssertFalse(ImageFilter.matches(name: "IMG_0001.JPG", query: "0002"))
+    }
+
+    /// 文件名带扩展名,所以扩展名天然可搜 —— 不需要单独的"按类型过滤"控件。
+    func testMatchesByExtension() {
+        XCTAssertTrue(ImageFilter.matches(name: "cover.jpg", query: "jpg"))
+        XCTAssertFalse(ImageFilter.matches(name: "cover.png", query: "jpg"))
+    }
+
+    /// 多词之间是 AND,且与词序无关。
+    func testMultipleTermsAreAndedRegardlessOfOrder() {
+        XCTAssertTrue(ImageFilter.matches(name: "2024-10-01.jpg", query: "jpg 2024"))
+        XCTAssertTrue(ImageFilter.matches(name: "2024-10-01.jpg", query: "2024 jpg"))
+        XCTAssertFalse(ImageFilter.matches(name: "2025-10-01.jpg", query: "jpg 2024"))
+    }
+
+    /// 没有过滤词时必须**原样返回**(不重建数组):网格 body 每次求值都会走这里。
+    func testApplyWithoutQueryReturnsInputUntouched() {
+        let input = files(["a.jpg", "b.png"])
+        XCTAssertEqual(ImageFilter.apply(to: input, query: "").map(\.id), input.map(\.id))
+        XCTAssertEqual(ImageFilter.apply(to: input, query: "  ").map(\.id), input.map(\.id))
+    }
+
+    func testApplyKeepsOriginalOrder() {
+        let input = files(["b-2.jpg", "a-1.jpg", "c-1.jpg", "a-2.jpg"])
+        let filtered = ImageFilter.apply(to: input, query: "a-")
+        XCTAssertEqual(filtered.map(\.name), ["a-1.jpg", "a-2.jpg"])
+    }
+}
+
+/// B4-b 直方图:统计必须是纯计算,降采样、白底合成、归一化都在这里锁住。
+final class HistogramTests: XCTestCase {
+
+    /// 造一张纯色位图。alpha 按**预乘**约定填写(不透明时 a=255、颜色即真值)。
+    private func solidImage(width: Int, height: Int,
+                            red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8) -> CGImage? {
+        let bytesPerRow = width * 4
+        var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        for offset in stride(from: 0, to: bytes.count, by: 4) {
+            bytes[offset] = red
+            bytes[offset + 1] = green
+            bytes[offset + 2] = blue
+            bytes[offset + 3] = alpha
+        }
+        return bytes.withUnsafeMutableBytes { raw in
+            guard let context = CGContext(data: raw.baseAddress,
+                                          width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return nil }
+            return context.makeImage()
+        }
+    }
+
+    func testSolidColorLandsInItsOwnBin() {
+        guard let image = solidImage(width: 40, height: 30, red: 128, green: 64, blue: 200, alpha: 255) else {
+            return XCTFail("无法构造测试位图")
+        }
+        let histogram = Histogram.compute(from: image)
+        XCTAssertEqual(histogram.sampleCount, 1200)
+        XCTAssertEqual(histogram.red[128], 1200)
+        XCTAssertEqual(histogram.green[64], 1200)
+        XCTAssertEqual(histogram.blue[200], 1200)
+        // 除目标桶之外不应有别的计数
+        XCTAssertEqual(histogram.red.reduce(0, +), 1200)
+        XCTAssertEqual(histogram.red.filter { $0 > 0 }.count, 1)
+    }
+
+    /// 大图按长边降采样:这是"不碰原图"的具体含义。
+    func testLargeImageIsDownsampled() {
+        guard let image = solidImage(width: 1000, height: 500, red: 10, green: 20, blue: 30, alpha: 255) else {
+            return XCTFail("无法构造测试位图")
+        }
+        let histogram = Histogram.compute(from: image, maxSide: 100)
+        XCTAssertEqual(histogram.sampleCount, 100 * 50)
+    }
+
+    /// 比 maxSide 还小的图不该被放大。
+    func testSmallImageIsNotUpscaled() {
+        guard let image = solidImage(width: 64, height: 32, red: 1, green: 2, blue: 3, alpha: 255) else {
+            return XCTFail("无法构造测试位图")
+        }
+        let histogram = Histogram.compute(from: image, maxSide: 512)
+        XCTAssertEqual(histogram.sampleCount, 64 * 32)
+    }
+
+    /// 全透明像素必须先铺白底再统计;否则预乘的 0 会被记成全黑,
+    /// 直方图凭空多出一根贴左的假尖峰。
+    func testTransparentPixelsAreCompositedOverWhite() {
+        guard let image = solidImage(width: 20, height: 20, red: 0, green: 0, blue: 0, alpha: 0) else {
+            return XCTFail("无法构造测试位图")
+        }
+        let histogram = Histogram.compute(from: image)
+        XCTAssertEqual(histogram.red[255], 400)
+        XCTAssertEqual(histogram.red[0], 0)
+    }
+
+    func testNormalizedIsRelativeToSharedPeak() {
+        var histogram = Histogram.empty
+        histogram.red = Array(repeating: 0, count: Histogram.binCount)
+        histogram.green = Array(repeating: 0, count: Histogram.binCount)
+        histogram.blue = Array(repeating: 0, count: Histogram.binCount)
+        histogram.red[10] = 100
+        histogram.green[20] = 50
+        histogram.sampleCount = 150
+
+        XCTAssertEqual(histogram.peak, 100)
+        XCTAssertEqual(histogram.normalized(histogram.red)[10], 1.0, accuracy: 1e-9)
+        XCTAssertEqual(histogram.normalized(histogram.green)[20], 0.5, accuracy: 1e-9)
+    }
+
+    /// 空直方图与长度不对的通道都返回全零序列,不返回 NaN、也不越界。
+    func testNormalizedGuardsEmptyAndWrongLength() {
+        XCTAssertEqual(Histogram.empty.peak, 0)
+        XCTAssertTrue(Histogram.empty.isEmpty)
+        let zeros = Histogram.empty.normalized([])
+        XCTAssertEqual(zeros.count, Histogram.binCount)
+        XCTAssertTrue(zeros.allSatisfy { $0 == 0 })
+        let short = Histogram.empty.normalized([1, 2, 3])
+        XCTAssertEqual(short.count, Histogram.binCount)
+        XCTAssertTrue(short.allSatisfy { $0 == 0 })
+    }
+}

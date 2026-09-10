@@ -120,7 +120,7 @@ struct PureHeader: View {
                     help: store.isSlideshowActive && !store.isSlideshowPaused
                         ? "暂停幻灯片 (空格)"
                         : "幻灯片播放 (空格)",
-                    disabled: store.currentImage == nil || store.images.count < 2
+                    disabled: store.currentImage == nil || store.visibleImages.count < 2
                 ) { store.toggleSlideshow() }
                 HeaderDivider()
                 HeaderButton(

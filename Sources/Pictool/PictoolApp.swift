@@ -54,6 +54,10 @@ struct PictoolApp: App {
     @State private var store = FolderStore()
     @State private var annotations = AnnotationStore()
 
+    /// 文本输入(缩略图过滤框)是否获得焦点。菜单里所有**裸键与编辑类**快捷键据此让路,
+    /// 否则用户打字时会误触发切图/裁切/删文件。
+    private var textInputActive: Bool { store.isTextInputFocused }
+
     var body: some Scene {
         Window("PureView", id: "main") {
             MainContentView()
@@ -110,23 +114,26 @@ struct PictoolApp: App {
                 Button("拼版打印…") { store.requestContactSheet() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                     .disabled(store.currentImage == nil || store.isModalPresented
-                              || store.images.count < 2)
+                              || store.visibleImages.count < 2)
             }
             CommandMenu("图片") {
-                // 裸键与方向键在模态面板打开时一律失效,否则会在面板背后改动浏览状态
+                // 裸键与方向键在模态面板打开时一律失效,否则会在面板背后改动浏览状态。
+                // 另外还要让位给文本输入:缩略图过滤框是本窗口唯一的输入框,
+                // 它一旦拿到焦点,敲 "i" 会切信息面板、敲 "c" 会进裁切、⌘⌫ 会去废纸篓删文件
+                // —— 全是用户想打字却动了别的东西。这个坑以前不存在,因为主窗口没有输入框。
                 Button("上一张") { store.step(-1) }
                     .keyboardShortcut(.leftArrow, modifiers: [])
-                    .disabled(!store.canStep(-1) || store.isModalPresented)
+                    .disabled(!store.canStep(-1) || store.isModalPresented || textInputActive)
                 Button("下一张") { store.step(1) }
                     .keyboardShortcut(.rightArrow, modifiers: [])
-                    .disabled(!store.canStep(1) || store.isModalPresented)
+                    .disabled(!store.canStep(1) || store.isModalPresented || textInputActive)
                 Divider()
                 Button("适配窗口") { store.requestZoom(.fit) }
                     .keyboardShortcut("0", modifiers: [])
-                    .disabled(store.currentImage == nil || store.isModalPresented)
+                    .disabled(store.currentImage == nil || store.isModalPresented || textInputActive)
                 Button("实际大小") { store.requestZoom(.actualSize) }
                     .keyboardShortcut("1", modifiers: [])
-                    .disabled(store.currentImage == nil || store.isModalPresented)
+                    .disabled(store.currentImage == nil || store.isModalPresented || textInputActive)
                 Button("放大") { store.requestZoom(.zoomIn) }
                     .keyboardShortcut("=", modifiers: .command)
                     .disabled(store.currentImage == nil || store.isModalPresented)
@@ -136,12 +143,13 @@ struct PictoolApp: App {
                 Divider()
                 Button("信息面板") { store.showInspector.toggle() }
                     .keyboardShortcut("i", modifiers: [])
-                    .disabled(store.isModalPresented)
+                    .disabled(store.isModalPresented || textInputActive)
                 Button(store.isImmersive ? "退出只看图" : "只看图") {
                     store.toggleImmersive()
                 }
                     .keyboardShortcut("f", modifiers: [])
-                    .disabled((store.currentImage == nil && !store.isImmersive) || store.isModalPresented)
+                    .disabled((store.currentImage == nil && !store.isImmersive)
+                              || store.isModalPresented || textInputActive)
                 Button(
                     store.isSlideshowActive
                         ? (store.isSlideshowPaused ? "继续幻灯片" : "暂停幻灯片")
@@ -150,21 +158,45 @@ struct PictoolApp: App {
                     store.toggleSlideshow()
                 }
                     .keyboardShortcut(.space, modifiers: [])
-                    .disabled(store.currentImage == nil || store.isModalPresented || store.images.count < 2)
+                    .disabled(store.currentImage == nil || store.isModalPresented
+                              || store.visibleImages.count < 2 || textInputActive)
                 Button("裁切…") { store.requestCrop() }
                     .keyboardShortcut("c", modifiers: [])
                     .disabled(store.currentImage == nil
                               || (store.isModalPresented && !store.isEditing)
-                              || store.isTextDraftActive)
+                              || store.isTextDraftActive
+                              || textInputActive)
                 Button("标记…") { store.requestMarkup() }
                     .keyboardShortcut("d", modifiers: [])
                     .disabled(store.currentImage == nil
                               || (store.isModalPresented && !store.isEditing)
-                              || store.isTextDraftActive)
+                              || store.isTextDraftActive
+                              || textInputActive)
                 Divider()
                 Button("顺时针旋转 90°") { store.requestRotate() }
                     .keyboardShortcut("r", modifiers: [.command, .option])
                     .disabled(store.currentImage == nil || store.isModalPresented)
+                Divider()
+                // D2 浏览快捷键:动作早就有了(右键菜单 / 顶栏),缺的只是键盘入口。
+                // 一律以 canActOnCurrentImage 门禁 —— 编辑中、模态中全部失效,
+                // 否则会在面板背后改动浏览状态。
+                //
+                // 与排期文档的一处偏离:文档写"无选中标注时才复制图片"(即编辑中也可能复制
+                // 图片),实际做成**编辑中一律不复制图片**。因为 EditView 自己也注册了 ⌘C
+                // (复制选中标注),两个同名快捷键同时有效会退化成"看谁先响应"的不确定行为。
+                // 保守起见编辑态只留 EditView 那一个,代价是"编辑中无选中标注时 ⌘C 不动"。
+                Button("复制图片") { store.copyCurrentImage() }
+                    .keyboardShortcut("c", modifiers: .command)
+                    .disabled(!store.canActOnCurrentImage || textInputActive)
+                Button("隐藏") { store.hideCurrentImage() }
+                    .keyboardShortcut("h", modifiers: [])
+                    .disabled(!store.canActOnCurrentImage || textInputActive)
+                Button("移到废纸篓…") { store.deleteCurrentImage() }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(!store.canActOnCurrentImage || textInputActive)
+                Button("在 Finder 中显示") { store.revealCurrentInFinder() }
+                    .keyboardShortcut("j", modifiers: [.command, .shift])
+                    .disabled(store.currentImage == nil)
             }
         }
         Settings {

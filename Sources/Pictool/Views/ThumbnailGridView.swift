@@ -7,6 +7,8 @@ struct ThumbnailGridView: View {
     /// 是否处于向上扩展态(由 SidebarView 持有,联动压缩文件夹树)
     @Binding var expanded: Bool
     @State private var headerHovering = false
+    /// 过滤框焦点。写回 `store.isTextInputFocused`,让菜单里的裸键快捷键整体让路。
+    @FocusState private var filterFocused: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 72, maximum: 120), spacing: 6)]
 
@@ -14,7 +16,7 @@ struct ThumbnailGridView: View {
         VStack(alignment: .leading, spacing: 0) {
             // 左:标题+计数一组;右:恢复链接与箭头。整行可点切换展开
             HStack(spacing: 8) {
-                Text("缩略图 · \(store.images.count)")
+                Text(filterHeaderText)
                     .font(.callout.weight(.semibold))
                     .monospacedDigit()
                     .lineLimit(1)
@@ -60,6 +62,8 @@ struct ThumbnailGridView: View {
             )
             .padding(.horizontal, 4)
 
+            if !store.images.isEmpty { filterField }
+
             if store.folderScanning && store.images.isEmpty {
                 ProgressView()
                     .controlSize(.small)
@@ -75,11 +79,13 @@ struct ThumbnailGridView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if store.visibleImages.isEmpty {
+                noMatchView
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 10) {
-                            ForEach(Array(store.images.enumerated()), id: \.element.id) { idx, file in
+                            ForEach(Array(store.visibleImages.enumerated()), id: \.element.id) { idx, file in
                                 ThumbCell(file: file, isCurrent: file.id == store.selectedImageID, isVisible: idx < 30)
                                     .id(file.id)
                                     .onTapGesture { store.selectImage(file.id) }
@@ -115,6 +121,74 @@ struct ThumbnailGridView: View {
             }
         }
         .frame(maxHeight: .infinity)
+    }
+
+    /// 标题计数:过滤中显示「可见/总数」,一眼看出被筛掉了多少。
+    private var filterHeaderText: String {
+        store.isFiltering
+            ? "缩略图 · \(store.visibleImages.count)/\(store.images.count)"
+            : "缩略图 · \(store.images.count)"
+    }
+
+    /// 过滤输入框。绑定走 `store.setFilter` 而不是直接写字段 ——
+    /// 改过滤词必须顺手收拢被筛掉的选中项,这个不变式由 store 自己守。
+    private var filterField: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            TextField("过滤文件名", text: Binding(
+                get: { store.filterText },
+                set: { store.setFilter($0) }
+            ))
+            .textFieldStyle(.plain)
+            .font(.system(size: 11))
+            .focused($filterFocused)
+            if store.isFiltering {
+                Button {
+                    store.clearFilter()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("清除过滤")
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.06)))
+        .onChange(of: filterFocused) { _, focused in
+            store.isTextInputFocused = focused
+        }
+        .onExitCommand { filterFocused = false }
+        .onDisappear {
+            // 侧栏收起、切到编辑态、文件夹清空都会让这个输入框消失,
+            // 而焦点回调不一定再触发一次 —— 别把"正在输入"留成 true 把菜单全锁死。
+            if store.isTextInputFocused { store.isTextInputFocused = false }
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+    }
+
+    /// 过滤词一个都没匹配上。此时**画布仍显示原来那张图**(store 保留选中不动),
+    /// 所以这里只是网格的局部空态,不是"文件夹空了"。
+    private var noMatchView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.system(size: 22))
+                .foregroundStyle(.tertiary)
+            Text("没有匹配「\(store.filterText)」的图片")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            Button("清除过滤") { store.clearFilter() }
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

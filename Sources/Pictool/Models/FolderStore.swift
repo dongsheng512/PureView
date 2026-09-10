@@ -296,19 +296,73 @@ final class FolderStore {
         return images.first { $0.id == id }
     }
 
-    /// 当前图前后各 1 张,供主视图预解码
+    /// 当前图前后各 1 张,供主视图预解码。
+    /// 跟着**过滤后的**序列走:过滤生效时预解码不该去读被筛掉的图。
     var neighborURLs: [URL] {
-        guard selectedImageID != nil, !images.isEmpty, currentIndex >= 0 else { return [] }
+        let list = visibleImages
+        let idx = visibleIndex
+        guard selectedImageID != nil, !list.isEmpty, idx >= 0 else { return [] }
         return [-1, 1].compactMap { offset in
-            let idx = currentIndex + offset
-            guard images.indices.contains(idx) else { return nil }
-            return images[idx].url
+            let target = idx + offset
+            guard list.indices.contains(target) else { return nil }
+            return list[target].url
         }
     }
 
     var currentIndex: Int {
         guard let id = selectedImageID else { return -1 }
         return images.firstIndex { $0.id == id } ?? -1
+    }
+
+    // MARK: - 文件夹内快速过滤
+
+    /// 缩略图网格的临时过滤词(空白分隔多词,AND)。空串 = 不过滤。
+    ///
+    /// **刻意不落盘**:它是"当下找一张图"的临时手段,粘到下次启动只会让人困惑。
+    /// 只能通过 `setFilter` 改 —— 改过滤词必须顺手把被筛掉的选中项挪回来,
+    /// 不能指望每个调用方都记得。
+    private(set) var filterText = ""
+
+    /// 缩略图过滤框是否正在输入。
+    ///
+    /// 主窗口此前没有任何文本输入,所以菜单里那批**裸键**快捷键(i / f / c / d / 空格 …)
+    /// 从来没有和输入冲突过。过滤框是第一个输入框,它一拿到焦点就必须让那些键让路,
+    /// 否则用户敲 "i" 会切信息面板、敲 "c" 会进裁切、⌘⌫ 会去废纸篓删文件。
+    var isTextInputFocused = false
+
+    /// 网格实际展示的序列(= `images` 按过滤词筛过)。
+    ///
+    /// `images` 本身**绝不动**:它同时喂着文件夹计数、隐藏/删除、排序与选中记忆,
+    /// 就地改写会连累一圈。浏览类操作(上/下一张、预解码、幻灯片、拼版打印)
+    /// 一律改走这里。
+    var visibleImages: [ImageFile] {
+        ImageFilter.apply(to: images, query: filterText)
+    }
+
+    /// 当前选中项在 `visibleImages` 中的位置;不在其中(或没选中)返回 -1。
+    var visibleIndex: Int {
+        guard let id = selectedImageID else { return -1 }
+        return visibleImages.firstIndex { $0.id == id } ?? -1
+    }
+
+    var isFiltering: Bool { !ImageFilter.terms(in: filterText).isEmpty }
+
+    /// 更新过滤词,并把被筛掉的选中项收拢到第一个可见项。
+    ///
+    /// 过滤词一张都匹配不上时**保留原选中不动** —— 网格显示"无匹配",
+    /// 画布继续显示原来那张,而不是突然空屏。
+    func setFilter(_ text: String) {
+        guard text != filterText else { return }
+        filterText = text
+        let list = visibleImages
+        guard let first = list.first else { return }
+        if let id = selectedImageID, list.contains(where: { $0.id == id }) { return }
+        setSelectedImage(first.id)
+        prefetchNeighbors()
+    }
+
+    func clearFilter() {
+        setFilter("")
     }
 
     var selectedFolder: FolderNode? { node(id: selectedFolderID) }
@@ -520,6 +574,9 @@ final class FolderStore {
         selectedFolderID = node.id
         isSingleImageMode = false
         singleImageSourceFolder = nil
+        // 换文件夹就丢掉过滤词:留着它很可能把新文件夹筛成空网格,让人以为图没了。
+        // 直接改字段而不是走 setFilter —— 此时新文件夹还没扫,visibleImages 还是旧的。
+        filterText = ""
         let key = standardized(node.url)
         if let prefer {
             selectionMemory[key] = standardized(prefer)
@@ -593,21 +650,24 @@ final class FolderStore {
     /// 步进切换;循环由 wrapNavigation 控制。
     /// 播放中每次成功步进都会重排计时(计时到点走这里,手动 ←/→ 也走这里,
     /// 因此手动切图天然重置计时);不循环时到达端点则停在当前张并转为暂停。
+    /// 走 `visibleImages`:过滤生效时只在可见项之间走。
     func step(_ delta: Int) {
-        guard !images.isEmpty else { return }
-        if currentIndex < 0 {
-            selectImage(images[0].id, direction: delta)
+        let list = visibleImages
+        guard !list.isEmpty else { return }
+        let current = visibleIndex
+        if current < 0 {
+            selectImage(list[0].id, direction: delta)
             rescheduleSlideshowAfterStep()
             return
         }
         guard let idx = ImageNavigation.nextIndex(
-            current: currentIndex, count: images.count, delta: delta, wrap: wrapNavigation
-        ), idx != currentIndex else {
+            current: current, count: list.count, delta: delta, wrap: wrapNavigation
+        ), idx != current else {
             if isSlideshowActive { isSlideshowPaused = true }
             return
         }
         lastStepDirection = delta > 0 ? 1 : (delta < 0 ? -1 : 0)
-        selectImage(images[idx].id, direction: lastStepDirection)
+        selectImage(list[idx].id, direction: lastStepDirection)
         rescheduleSlideshowAfterStep()
     }
 
@@ -617,10 +677,12 @@ final class FolderStore {
     }
 
     func canStep(_ delta: Int) -> Bool {
+        let list = visibleImages
+        let current = visibleIndex
         guard let idx = ImageNavigation.nextIndex(
-            current: currentIndex, count: images.count, delta: delta, wrap: wrapNavigation
+            current: current, count: list.count, delta: delta, wrap: wrapNavigation
         ) else { return false }
-        return idx != currentIndex
+        return idx != current
     }
 
     func applySortPreference(_ preference: ImageSortPreference) {
@@ -783,11 +845,13 @@ final class FolderStore {
         contactSheetRequestToken += 1
     }
 
-    /// 拼版打印的候选集:当前图起、按浏览顺序连续排列。
-    /// 没有选中项时退化为整个文件夹(与 `currentIndex < 0` 的语义一致)。
+    /// 拼版打印的候选集:当前图起、按浏览顺序连续排列(跟随过滤词)。
+    /// 没有选中项时退化为整个可见序列(与 `visibleIndex < 0` 的语义一致)。
     var imagesFromCurrent: [ImageFile] {
-        guard selectedImageID != nil, !images.isEmpty, currentIndex >= 0 else { return images }
-        return Array(images[currentIndex...])
+        let list = visibleImages
+        let idx = visibleIndex
+        guard selectedImageID != nil, !list.isEmpty, idx >= 0 else { return list }
+        return Array(list[idx...])
     }
 
     func requestCrop() {
@@ -840,6 +904,34 @@ final class FolderStore {
         guard let image = NSImage(contentsOf: id),
               let tiff = image.tiffRepresentation else { return }
         pasteboard.setData(tiff, forType: .tiff)
+    }
+
+    // MARK: - 浏览态单图操作(「图片」菜单 D2 快捷键的落点)
+
+    /// 菜单门禁:有当前图,且不在模态/编辑态。
+    var canActOnCurrentImage: Bool {
+        currentImage != nil && !isModalPresented
+    }
+
+    func copyCurrentImage() {
+        guard let id = currentImage?.id else { return }
+        copyImageToPasteboard(id)
+    }
+
+    func hideCurrentImage() {
+        guard let id = currentImage?.id else { return }
+        hideImage(id)
+    }
+
+    /// 走 `deleteImage`:里面有废纸篓确认弹窗,⌘⌫ 不该比右键菜单更"顺手"地删文件。
+    func deleteCurrentImage() {
+        guard let id = currentImage?.id else { return }
+        deleteImage(id)
+    }
+
+    func revealCurrentInFinder() {
+        guard let url = currentImage?.url else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     /// 隐藏图片:仅从当前浏览列表移除,文件保留在磁盘

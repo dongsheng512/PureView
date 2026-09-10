@@ -153,8 +153,8 @@ struct MainContentView: View {
             if slideshowHUDVisible {
                 SlideshowHUD(
                     playing: store.isSlideshowActive && !store.isSlideshowPaused,
-                    canPlay: store.images.count >= 2 && store.currentImage != nil,
-                    positionText: "\(max(store.currentIndex, 0) + 1) / \(store.images.count)",
+                    canPlay: store.visibleImages.count >= 2 && store.currentImage != nil,
+                    positionText: "\(max(store.visibleIndex, 0) + 1) / \(store.visibleImages.count)",
                     intervalLabel: store.slideshowInterval.label,
                     onPrev: { store.step(-1) },
                     onToggle: { store.toggleSlideshow() },
@@ -593,7 +593,7 @@ struct MainContentView: View {
 
                 statusBarDivider
                 // 导航组
-                Text("\(store.currentIndex + 1) / \(store.images.count)")
+                Text("\(store.visibleIndex + 1) / \(store.visibleImages.count)")
                     .monospacedDigit()
                 if store.imageLoading {
                     ProgressView()

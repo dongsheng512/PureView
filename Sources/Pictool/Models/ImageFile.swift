@@ -175,3 +175,40 @@ enum FolderListing {
         hidden.intersection(onDisk)
     }
 }
+
+/// 缩略图网格的即时过滤。纯函数,便于单测。
+///
+/// 语义刻意保持"朴素可预期":过滤词按空白拆成多个词,**全部**命中才算匹配(AND);
+/// 每个词按「文件名包含该子串」判定,不区分大小写。
+/// 文件名本身带扩展名,所以 `jpg` / `png` 天然就是可搜的扩展名过滤。
+enum ImageFilter {
+
+    /// 过滤词 → 小写词表。空串或纯空白 → 空数组(调用方按"不过滤"处理)。
+    static func terms(in query: String) -> [String] {
+        query.lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+    }
+
+    static func matches(name: String, query: String) -> Bool {
+        let terms = terms(in: query)
+        guard !terms.isEmpty else { return true }
+        let haystack = name.lowercased()
+        return terms.allSatisfy { haystack.contains($0) }
+    }
+
+    static func matches(_ file: ImageFile, query: String) -> Bool {
+        matches(name: file.name, query: query)
+    }
+
+    /// 过滤后的序列。没有过滤词时**原样返回**,不做无谓的数组拷贝
+    /// (网格有上千张图,每次 body 求值都拷贝一遍是纯浪费)。
+    static func apply(to files: [ImageFile], query: String) -> [ImageFile] {
+        let terms = terms(in: query)
+        guard !terms.isEmpty else { return files }
+        return files.filter { file in
+            let haystack = file.name.lowercased()
+            return terms.allSatisfy { haystack.contains($0) }
+        }
+    }
+}
