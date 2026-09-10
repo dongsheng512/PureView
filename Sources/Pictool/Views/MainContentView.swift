@@ -337,6 +337,10 @@ struct MainContentView: View {
 
                 if store.roots.isEmpty {
                     welcomeOverlay
+                } else if store.folderScanning && store.currentImage == nil {
+                    ProgressView()
+                        .controlSize(.regular)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if store.imageLoading && store.displayInfo.pixelWidth == 0 {
                     ProgressView()
                         .controlSize(.regular)
@@ -393,6 +397,20 @@ struct MainContentView: View {
                 .foregroundStyle(.secondary)
             Button("打开文件夹…") { store.openFolderPanel() }
                 .keyboardShortcut("o", modifiers: .command)
+            if !store.recentFolders.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("最近打开")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 6)
+                    ForEach(store.recentFolders) { item in
+                        WelcomeRecentRow(item: item) {
+                            store.openRecentFolder(item.url)
+                        }
+                    }
+                }
+                .frame(maxWidth: 360)
+            }
             Text("也可以直接把图片或文件夹拖入窗口")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
@@ -400,6 +418,41 @@ struct MainContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environment(\.colorScheme, ChromeTheme.colorScheme(for: canvasBackground))
         .background(MainChromeBackground(canvas: canvasBackground))
+    }
+
+    private struct WelcomeRecentRow: View {
+        let item: RecentFolders.Item
+        let action: () -> Void
+        @State private var hovering = false
+
+        var body: some View {
+            Button(action: action) {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder")
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.name)
+                            .foregroundStyle(.primary)
+                        Text(item.displayPath)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 5)
+                .padding(.horizontal, 8)
+                .background {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(hovering ? Color.primary.opacity(0.08) : .clear)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .help(item.displayPath)
+        }
     }
 
     /// 缩放下拉的菜单项(悬停高亮)
@@ -477,6 +530,12 @@ struct MainContentView: View {
                 }
                 Spacer()
                 zoomMenu
+            } else if store.folderScanning {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("正在扫描文件夹…")
+                    .foregroundStyle(.secondary)
+                Spacer()
             } else {
                 Text("未打开图片").foregroundStyle(.secondary)
                 Spacer()
@@ -660,20 +719,18 @@ struct MainContentView: View {
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         guard !providers.isEmpty else { return false }
-        var pending = providers.count
-        var urls: [URL] = []
-        let lock = NSLock()
+        // 回调在后台线程、可能并发进来,所以状态收进 Locked,不在闭包里直接捕获 var。
+        let state = Locked((pending: providers.count, urls: [URL]()))
         for provider in providers {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                var shouldHandle = false
-                lock.lock()
-                if let url { urls.append(url) }
-                pending -= 1
-                shouldHandle = pending == 0
-                lock.unlock()
-                if shouldHandle {
+                let outcome = state.withLock { s -> (finished: Bool, urls: [URL]) in
+                    if let url { s.urls.append(url) }
+                    s.pending -= 1
+                    return (s.pending == 0, s.urls)
+                }
+                if outcome.finished {
                     Task { @MainActor in
-                        self.handleDroppedURLs(urls)
+                        self.handleDroppedURLs(outcome.urls)
                     }
                 }
             }

@@ -175,6 +175,123 @@ final class ShapeGeometryTests: XCTestCase {
                                               to: CGPoint(x: 0.6, y: 0.5), widthFraction: 0.004,
                                               canvasSize: canvas, at: CGPoint(x: 0.594, y: 0.503)))
     }
+
+    func testShapeHandleHitCornersAndMiss() {
+        let from = CGPoint(x: 0.2, y: 0.2), to = CGPoint(x: 0.5, y: 0.6)
+        XCTAssertEqual(
+            MarkupGeometry.hitShapeHandle(kind: .rect, from: from, to: to,
+                                          at: CGPoint(x: 0.2, y: 0.2), tolerance: 0.02),
+            .corner(.nw)
+        )
+        XCTAssertEqual(
+            MarkupGeometry.hitShapeHandle(kind: .rect, from: from, to: to,
+                                          at: CGPoint(x: 0.35, y: 0.2), tolerance: 0.02),
+            .edge(.n)
+        )
+        XCTAssertNil(
+            MarkupGeometry.hitShapeHandle(kind: .rect, from: from, to: to,
+                                          at: CGPoint(x: 0.35, y: 0.4), tolerance: 0.02)
+        )
+        XCTAssertEqual(
+            MarkupGeometry.hitShapeHandle(kind: .line, from: from, to: to,
+                                          at: to, tolerance: 0.02),
+            .endpoint(false)
+        )
+    }
+
+    func testEllipseHandlesSitOnCardinalPoints() {
+        let from = CGPoint(x: 0.2, y: 0.2), to = CGPoint(x: 0.5, y: 0.6)
+        let handles = MarkupGeometry.shapeHandles(kind: .ellipse, from: from, to: to)
+        XCTAssertEqual(handles.count, 4)
+        let kinds = handles.map(\.0)
+        XCTAssertTrue(kinds.contains(.edge(.n)))
+        XCTAssertTrue(kinds.contains(.edge(.e)))
+        XCTAssertTrue(kinds.contains(.edge(.s)))
+        XCTAssertTrue(kinds.contains(.edge(.w)))
+        XCTAssertFalse(kinds.contains { if case .corner = $0 { return true }; return false })
+        // 上顶点在椭圆上;包围盒角不在椭圆上,不应命中手柄
+        XCTAssertEqual(
+            MarkupGeometry.hitShapeHandle(kind: .ellipse, from: from, to: to,
+                                          at: CGPoint(x: 0.35, y: 0.2), tolerance: 0.02),
+            .edge(.n)
+        )
+        XCTAssertNil(
+            MarkupGeometry.hitShapeHandle(kind: .ellipse, from: from, to: to,
+                                          at: CGPoint(x: 0.2, y: 0.2), tolerance: 0.02)
+        )
+        XCTAssertEqual(MarkupGeometry.shapeHandles(kind: .rect, from: from, to: to).count, 8)
+        XCTAssertEqual(MarkupGeometry.shapeHandles(kind: .arrow, from: from, to: to).count, 2)
+    }
+
+    func testReshapeCornerAndEdge() {
+        let from = CGPoint(x: 0.2, y: 0.2), to = CGPoint(x: 0.5, y: 0.6)
+        let se = MarkupGeometry.reshaped(kind: .rect, from: from, to: to,
+                                         handle: .corner(.se),
+                                         to: CGPoint(x: 0.7, y: 0.8), lockAspect: false)
+        XCTAssertEqual(se.from.x, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(se.from.y, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(se.to.x, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(se.to.y, 0.8, accuracy: 0.0001)
+        let east = MarkupGeometry.reshaped(kind: .ellipse, from: from, to: to,
+                                           handle: .edge(.e),
+                                           to: CGPoint(x: 0.8, y: 0.9), lockAspect: false)
+        XCTAssertEqual(east.from.y, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(east.to.y, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(east.to.x, 0.8, accuracy: 0.0001)
+    }
+
+    func testReshapeLockAspectKeepsRatio() {
+        let from = CGPoint(x: 0.2, y: 0.2), to = CGPoint(x: 0.4, y: 0.4)
+        let next = MarkupGeometry.reshaped(kind: .rect, from: from, to: to,
+                                           handle: .corner(.se),
+                                           to: CGPoint(x: 0.8, y: 0.5), lockAspect: true)
+        let w = next.to.x - next.from.x
+        let h = next.to.y - next.from.y
+        XCTAssertEqual(w / h, 1, accuracy: 0.001)
+        XCTAssertEqual(next.from.x, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(next.from.y, 0.2, accuracy: 0.0001)
+    }
+
+    func testReshapeMinSizeAndUnitClamp() {
+        let from = CGPoint(x: 0.2, y: 0.2), to = CGPoint(x: 0.5, y: 0.6)
+        let tiny = MarkupGeometry.reshaped(kind: .rect, from: from, to: to,
+                                           handle: .corner(.se),
+                                           to: CGPoint(x: 0.201, y: 0.201), lockAspect: false)
+        XCTAssertGreaterThanOrEqual(tiny.to.x - tiny.from.x, MarkupGeometry.shapeMinSize - 1e-6)
+        XCTAssertGreaterThanOrEqual(tiny.to.y - tiny.from.y, MarkupGeometry.shapeMinSize - 1e-6)
+        let line = MarkupGeometry.reshaped(kind: .line, from: from, to: to,
+                                           handle: .endpoint(false),
+                                           to: from, lockAspect: false)
+        XCTAssertGreaterThanOrEqual(hypot(line.to.x - line.from.x, line.to.y - line.from.y),
+                                    MarkupGeometry.shapeMinSize - 1e-6)
+        let out = MarkupGeometry.reshaped(kind: .rect, from: from, to: to,
+                                          handle: .corner(.se),
+                                          to: CGPoint(x: 2, y: 2), lockAspect: false)
+        XCTAssertLessThanOrEqual(out.to.x, 1)
+        XCTAssertLessThanOrEqual(out.to.y, 1)
+        XCTAssertGreaterThanOrEqual(out.from.x, 0)
+        XCTAssertGreaterThanOrEqual(out.from.y, 0)
+    }
+}
+
+final class MarkupColorTests: XCTestCase {
+    func testPaletteOutOfRangeIsBlack() {
+        XCTAssertEqual(MarkPalette.nsColor(.palette(99)), .black)
+    }
+
+    func testCommonPaletteHasTwentyFourColors() {
+        XCTAssertEqual(MarkPalette.colors.count, 24)
+        XCTAssertEqual(MarkPalette.color(0), .black)
+        XCTAssertEqual(MarkPalette.color(1), .white)
+    }
+
+    func testCustomLightByLuminance() {
+        XCTAssertTrue(MarkPalette.isLight(.palette(1)))
+        XCTAssertTrue(MarkPalette.isLight(.palette(3)))
+        XCTAssertFalse(MarkPalette.isLight(.palette(2)))
+        XCTAssertTrue(MarkPalette.isLight(.custom(r: 0.95, g: 0.95, b: 0.9)))
+        XCTAssertFalse(MarkPalette.isLight(.custom(r: 0.1, g: 0.1, b: 0.2)))
+    }
 }
 
 final class CropMathTests: XCTestCase {
@@ -329,6 +446,53 @@ final class ImageDiscoveryTests: XCTestCase {
         )
         let pref = ImageSortPreference(key: .captured, direction: .ascending)
         XCTAssertTrue(ImageDiscovery.compare(withExif, noExif, by: pref))
+    }
+}
+
+final class FolderListingTests: XCTestCase {
+
+    func testShouldApplyRejectsStaleGeneration() {
+        let folder = URL(fileURLWithPath: "/tmp/pics")
+        XCTAssertFalse(FolderListing.shouldApply(
+            scanGeneration: 1, currentGeneration: 2, scanned: folder, selected: folder
+        ))
+        XCTAssertTrue(FolderListing.shouldApply(
+            scanGeneration: 3, currentGeneration: 3, scanned: folder, selected: folder
+        ))
+    }
+
+    func testShouldApplyRejectsNilOrDifferentFolder() {
+        let a = URL(fileURLWithPath: "/tmp/a")
+        let b = URL(fileURLWithPath: "/tmp/b")
+        XCTAssertFalse(FolderListing.shouldApply(
+            scanGeneration: 1, currentGeneration: 1, scanned: a, selected: nil
+        ))
+        XCTAssertFalse(FolderListing.shouldApply(
+            scanGeneration: 1, currentGeneration: 1, scanned: a, selected: b
+        ))
+        XCTAssertTrue(FolderListing.shouldApply(
+            scanGeneration: 1, currentGeneration: 1,
+            scanned: URL(fileURLWithPath: "/tmp/a/"),
+            selected: a
+        ))
+    }
+
+    func testExcludingHiddenUsesStandardizedURL() {
+        let keep = URL(fileURLWithPath: "/tmp/keep.jpg")
+        let hide = URL(fileURLWithPath: "/tmp/hide.jpg")
+        let hidden: Set<URL> = [hide.standardizedFileURL]
+        let visible = FolderListing.excludingHidden(
+            [keep, URL(fileURLWithPath: "/tmp/hide.jpg/")],
+            hidden: hidden
+        )
+        XCTAssertEqual(visible.map(\.lastPathComponent), ["keep.jpg"])
+    }
+
+    func testPruneHiddenDropsVanishedFiles() {
+        let a = URL(fileURLWithPath: "/tmp/a.jpg").standardizedFileURL
+        let b = URL(fileURLWithPath: "/tmp/b.jpg").standardizedFileURL
+        let pruned = FolderListing.pruneHidden([a, b], onDisk: [a])
+        XCTAssertEqual(pruned, [a])
     }
 }
 
@@ -1046,27 +1210,73 @@ final class MarkupGeometryTests: XCTestCase {
     }
 
     func testMappedRoundTripKeepsPayload() {
-        // CW→CCW 往返应回到原位,且 sizeFraction/style/effect/colorIndex 等载荷不丢
+        // CW→CCW 往返应回到原位,且 sizeFraction/style/effect/color 等载荷不丢
         let original = Annotation(kind: .text(anchor: CGPoint(x: 0.2, y: 0.3),
                                               content: "标注",
-                                              sizeFraction: 0.05, colorIndex: 3))
+                                              sizeFraction: 0.05, color: .palette(3)))
         let roundTrip = MarkupGeometry.mapped(
             MarkupGeometry.mapped(original, MarkupGeometry.rotateCW90), MarkupGeometry.rotateCCW90
         )
-        guard case let .text(anchor, content, sizeFraction, colorIndex) = roundTrip.kind else {
+        guard case let .text(anchor, content, sizeFraction, color) = roundTrip.kind else {
             return XCTFail("kind must stay .text")
         }
         XCTAssertEqual(anchor.x, 0.2, accuracy: 0.0001)
         XCTAssertEqual(anchor.y, 0.3, accuracy: 0.0001)
         XCTAssertEqual(content, "标注")
         XCTAssertEqual(sizeFraction, 0.05, accuracy: 0.0001)
-        XCTAssertEqual(colorIndex, 3)
+        XCTAssertEqual(color, .palette(3))
         let stroke = Annotation(kind: .stroke(points: [.zero, CGPoint(x: 0.4, y: 0.4)],
-                                              widthLevel: 2, colorIndex: 4, style: .highlighter))
+                                              widthLevel: 2, color: .palette(4), style: .highlighter))
         let strokeTrip = MarkupGeometry.mapped(
             MarkupGeometry.mapped(stroke, MarkupGeometry.flipH), MarkupGeometry.flipH
         )
         XCTAssertEqual(strokeTrip, stroke)
+    }
+
+    func testOffsetNudgesAndKeepsPayload() {
+        let text = Annotation.Kind.text(anchor: CGPoint(x: 0.2, y: 0.3), content: "hi",
+                                        sizeFraction: 0.05, color: .palette(2))
+        guard case let .text(anchor, content, size, color) =
+                MarkupGeometry.offset(text, dx: MarkupGeometry.pasteNudge, dy: MarkupGeometry.pasteNudge) else {
+            return XCTFail("text")
+        }
+        XCTAssertEqual(anchor.x, 0.23, accuracy: 0.0001)
+        XCTAssertEqual(anchor.y, 0.33, accuracy: 0.0001)
+        XCTAssertEqual(content, "hi")
+        XCTAssertEqual(size, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(color, .palette(2))
+
+        let stroke = Annotation.Kind.stroke(
+            points: [CGPoint(x: 0.1, y: 0.1), CGPoint(x: 0.2, y: 0.2)],
+            widthLevel: 2, color: .custom(r: 0.1, g: 0.2, b: 0.3), style: .highlighter
+        )
+        guard case let .stroke(points, width, color2, style) =
+                MarkupGeometry.offset(stroke, dx: 0.03, dy: 0.03) else {
+            return XCTFail("stroke")
+        }
+        XCTAssertEqual(points[0].x, 0.13, accuracy: 0.0001)
+        XCTAssertEqual(width, 2)
+        XCTAssertEqual(color2, .custom(r: 0.1, g: 0.2, b: 0.3))
+        XCTAssertEqual(style, .highlighter)
+    }
+
+    func testOffsetClampsAsARigidGroup() {
+        let shape = Annotation.Kind.shape(
+            kind: .rect, from: CGPoint(x: 0.8, y: 0.8), to: CGPoint(x: 0.95, y: 0.9),
+            widthLevel: 1, color: .palette(0)
+        )
+        guard case let .shape(kind, from, to, width, color) =
+                MarkupGeometry.offset(shape, dx: 0.2, dy: 0.2) else {
+            return XCTFail("shape")
+        }
+        XCTAssertEqual(kind, .rect)
+        XCTAssertEqual(width, 1)
+        XCTAssertEqual(color, .palette(0))
+        // 整组被夹到右下,宽高不变
+        XCTAssertEqual(to.x - from.x, 0.15, accuracy: 0.0001)
+        XCTAssertEqual(to.y - from.y, 0.10, accuracy: 0.0001)
+        XCTAssertEqual(to.x, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(to.y, 1.0, accuracy: 0.0001)
     }
 
     func testPanForCenteredContentKeepsOffCenterPoint() {
@@ -1198,6 +1408,115 @@ final class MarkupGeometryTests: XCTestCase {
     }
 }
 
+/// P0-1 回归:旋转/翻转时裁切选区必须与标注走**同一套**映射。
+/// 修好前只映射 annotations、不映射 selection,旋转后导出裁到的是另一块内容。
+final class MarkupRectMappingTests: XCTestCase {
+
+    private let samples: [CGRect] = [
+        CGRect(x: 0.05, y: 0.10, width: 0.45, height: 0.60),
+        CGRect(x: 0, y: 0, width: 1, height: 1),
+        CGRect(x: 0.317, y: 0.021, width: 0.004, height: 0.983),
+        CGRect(x: 0.9, y: 0.85, width: 0.10, height: 0.15),
+    ]
+
+    /// 四角点各自套点变换后取包围盒 —— 矩形映射的「定义」
+    private func cornerBoundingBox(_ r: CGRect, _ f: (CGPoint) -> CGPoint) -> CGRect {
+        let corners = [
+            CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
+            CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY),
+        ].map(f)
+        let xs = corners.map(\.x), ys = corners.map(\.y)
+        return CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
+                      width: (xs.max() ?? 0) - (xs.min() ?? 0),
+                      height: (ys.max() ?? 0) - (ys.min() ?? 0))
+    }
+
+    private func assertRect(_ a: CGRect, _ b: CGRect, accuracy: CGFloat = 1e-9,
+                            _ message: String = "",
+                            file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(a.minX, b.minX, accuracy: accuracy, message, file: file, line: line)
+        XCTAssertEqual(a.minY, b.minY, accuracy: accuracy, message, file: file, line: line)
+        XCTAssertEqual(a.width, b.width, accuracy: accuracy, message, file: file, line: line)
+        XCTAssertEqual(a.height, b.height, accuracy: accuracy, message, file: file, line: line)
+    }
+
+    /// 闭式公式必须与「四角点包围盒」完全一致(否则与点变换就是两套语义)
+    func testClosedFormMatchesCornerBoundingBox() {
+        let cases: [(String, (CGPoint) -> CGPoint, (CGRect) -> CGRect)] = [
+            ("CW90", MarkupGeometry.rotateCW90, MarkupGeometry.mappedRectCW90),
+            ("CCW90", MarkupGeometry.rotateCCW90, MarkupGeometry.mappedRectCCW90),
+            ("flipH", MarkupGeometry.flipH, MarkupGeometry.mappedRectFlipH),
+            ("flipV", MarkupGeometry.flipV, MarkupGeometry.mappedRectFlipV),
+        ]
+        for (name, point, rect) in cases {
+            for r in samples {
+                assertRect(rect(r), cornerBoundingBox(r, point), "\(name) 映射不一致:\(r)")
+            }
+        }
+    }
+
+    /// 全图选区在任何变换下都应保持全图(否则「没裁过」的图一旋转就凭空裁掉一圈)
+    func testFullBleedSelectionIsInvariant() {
+        let full = CGRect(x: 0, y: 0, width: 1, height: 1)
+        assertRect(MarkupGeometry.mappedRectCW90(full), full)
+        assertRect(MarkupGeometry.mappedRectCCW90(full), full)
+        assertRect(MarkupGeometry.mappedRectFlipH(full), full)
+        assertRect(MarkupGeometry.mappedRectFlipV(full), full)
+    }
+
+    func testRoundTripsBackToOrigin() {
+        let base = CGRect(x: 0.13, y: 0.07, width: 0.42, height: 0.55)
+        var r = base
+        for _ in 0..<4 { r = MarkupGeometry.mappedRectCW90(r) }
+        assertRect(r, base, accuracy: 1e-9, "CW90 ×4 应回到原值")
+
+        r = base
+        for _ in 0..<4 { r = MarkupGeometry.mappedRectCCW90(r) }
+        assertRect(r, base, accuracy: 1e-9, "CCW90 ×4 应回到原值")
+
+        r = MarkupGeometry.mappedRectFlipH(MarkupGeometry.mappedRectFlipH(base))
+        assertRect(r, base, "flipH ×2 应回到原值")
+
+        r = MarkupGeometry.mappedRectFlipV(MarkupGeometry.mappedRectFlipV(base))
+        assertRect(r, base, "flipV ×2 应回到原值")
+    }
+
+    /// 映射只换朝向,像素面积必须守恒
+    func testPixelAreaIsPreserved() {
+        let base = CGRect(x: 0.13, y: 0.07, width: 0.42, height: 0.55)
+        let w = 1600.0, h = 900.0
+        let original = base.width * w * base.height * h
+        // 旋转后画幅宽高对调
+        XCTAssertEqual(MarkupGeometry.mappedRectCW90(base).width * h
+                       * MarkupGeometry.mappedRectCW90(base).height * w,
+                       original, accuracy: 1e-6)
+        let fh = MarkupGeometry.mappedRectFlipH(base)
+        XCTAssertEqual(fh.width * w * fh.height * h, original, accuracy: 1e-6)
+    }
+
+    /// 端到端:旋转后笔迹必须仍落在(映射过的)选区内
+    func testStrokeStaysInsideSelectionAfterRotate() {
+        let selection = CGRect(x: 0.05, y: 0.10, width: 0.45, height: 0.60)
+        let stroke = [CGPoint(x: 0.20, y: 0.25), CGPoint(x: 0.35, y: 0.40)]
+        let moved = stroke.map(MarkupGeometry.rotateCW90)
+        let mapped = MarkupGeometry.mappedRectCW90(selection)
+        for p in moved {
+            XCTAssertTrue(mapped.insetBy(dx: -1e-9, dy: -1e-9).contains(p),
+                          "旋转后笔迹 \(p) 应仍落在选区 \(mapped) 内")
+        }
+    }
+
+    /// 锁住修复前的错误行为:不映射选区时,同一条笔迹会掉出框。
+    /// 这条失败说明样本已经无法区分「修好」与「没修好」,需要换样本。
+    func testUnmappedSelectionLosesTheStroke() {
+        let selection = CGRect(x: 0.05, y: 0.10, width: 0.45, height: 0.60)
+        let stroke = [CGPoint(x: 0.20, y: 0.25), CGPoint(x: 0.35, y: 0.40)]
+        let moved = stroke.map(MarkupGeometry.rotateCW90)
+        XCTAssertFalse(moved.allSatisfy { selection.contains($0) },
+                       "该样本应能暴露「只转标注不转选区」的缺陷")
+    }
+}
+
 final class WatermarkLayoutTests: XCTestCase {
 
     private let canvas = CGSize(width: 1000, height: 500)
@@ -1253,9 +1572,9 @@ final class AnnotationRendererTests: XCTestCase {
     func testRenderOverlayProducesImage() throws {
         let annotations = [
             Annotation(kind: .text(anchor: CGPoint(x: 0.1, y: 0.1), content: "标记",
-                                   sizeFraction: MarkPalette.textSizes[1], colorIndex: 0)),
+                                   sizeFraction: MarkPalette.textSizes[1], color: .palette(0))),
             Annotation(kind: .stroke(points: [.zero, CGPoint(x: 0.5, y: 0.5)],
-                                     widthLevel: 1, colorIndex: 2, style: .solid)),
+                                     widthLevel: 1, color: .palette(2), style: .solid)),
         ]
         let image = try XCTUnwrap(AnnotationRenderer.renderOverlay(
             annotations: annotations, canvasSize: CGSize(width: 400, height: 300), base: nil
@@ -1280,7 +1599,7 @@ final class AnnotationRendererTests: XCTestCase {
     func testTextOverlayHasInkNearNormalizedAnchor() throws {
         let annotations = [
             Annotation(kind: .text(anchor: CGPoint(x: 0.1, y: 0.1), content: "测",
-                                   sizeFraction: MarkPalette.textSizes[2], colorIndex: 1))
+                                   sizeFraction: MarkPalette.textSizes[2], color: .palette(1)))
         ]
         let image = try XCTUnwrap(AnnotationRenderer.renderOverlay(
             annotations: annotations, canvasSize: CGSize(width: 200, height: 100), base: nil
@@ -1300,7 +1619,7 @@ final class AnnotationRendererTests: XCTestCase {
         let sizeFraction = MarkPalette.textSizes[2]
         let annotations = [
             Annotation(kind: .text(anchor: CGPoint(x: 0.08, y: 0.25), content: content,
-                                   sizeFraction: sizeFraction, colorIndex: 2))
+                                   sizeFraction: sizeFraction, color: .palette(2)))
         ]
         let image = try XCTUnwrap(AnnotationRenderer.renderOverlay(
             annotations: annotations, canvasSize: canvas, base: nil
@@ -1330,7 +1649,7 @@ final class AnnotationRendererTests: XCTestCase {
     func testTextFillMatchesPaletteColor() throws {
         let annotations = [
             Annotation(kind: .text(anchor: CGPoint(x: 0.1, y: 0.2), content: "A",
-                                   sizeFraction: MarkPalette.textSizes[2], colorIndex: 2))
+                                   sizeFraction: MarkPalette.textSizes[2], color: .palette(2)))
         ]
         let image = try XCTUnwrap(AnnotationRenderer.renderOverlay(
             annotations: annotations, canvasSize: CGSize(width: 240, height: 160), base: nil
@@ -1532,7 +1851,7 @@ final class AnnotationStoreTests: XCTestCase {
         let a = URL(fileURLWithPath: "/tmp/a.jpg")
         let b = URL(fileURLWithPath: "/tmp/b.jpg")
         let mark = Annotation(kind: .text(anchor: CGPoint(x: 0.2, y: 0.3), content: "x",
-                                          sizeFraction: MarkPalette.textSizes[1], colorIndex: 2))
+                                          sizeFraction: MarkPalette.textSizes[1], color: .palette(2)))
         store.set([mark], for: a)
         XCTAssertEqual(store.annotations(for: a).count, 1)
         XCTAssertTrue(store.annotations(for: b).isEmpty)
@@ -1543,11 +1862,24 @@ final class AnnotationStoreTests: XCTestCase {
     func testStandardizedFileURLUnifiesKeys() {
         let store = AnnotationStore()
         let mark = Annotation(kind: .stroke(points: [.zero, CGPoint(x: 1, y: 1)],
-                                            widthLevel: 0, colorIndex: 0, style: .solid))
+                                            widthLevel: 0, color: .palette(0), style: .solid))
         store.set([mark], for: URL(fileURLWithPath: "/tmp/foo.jpg"))
         XCTAssertEqual(AnnotationStore.storageKey(for: URL(fileURLWithPath: "/tmp/foo.jpg")),
                        AnnotationStore.storageKey(for: URL(fileURLWithPath: "/tmp/foo.jpg/")))
         XCTAssertEqual(store.annotations(for: URL(fileURLWithPath: "/tmp/foo.jpg/")).count, 1)
+    }
+
+    func testClipboardHoldsCopyUntilReplaced() {
+        let store = AnnotationStore()
+        XCTAssertNil(store.clipboard)
+        let mark = Annotation(kind: .shape(kind: .arrow, from: .zero, to: CGPoint(x: 1, y: 1),
+                                           widthLevel: 0, color: .palette(2)))
+        store.copyToClipboard(mark)
+        XCTAssertEqual(store.clipboard, mark)
+        let other = Annotation(kind: .text(anchor: .zero, content: "x",
+                                           sizeFraction: 0.04, color: .palette(0)))
+        store.copyToClipboard(other)
+        XCTAssertEqual(store.clipboard, other)
     }
 }
 
@@ -1594,5 +1926,158 @@ private enum TestPixels {
             }
         }
         return false
+    }
+}
+
+final class RecentFoldersTests: XCTestCase {
+
+    func testInsertMovesDuplicateToHeadAndCaps() {
+        let urls = (0..<10).map { URL(fileURLWithPath: "/tmp/pictool-recent-\($0)") }
+        var items: [RecentFolders.Item] = []
+        for url in urls {
+            items = RecentFolders.inserting(url, into: items)
+        }
+        XCTAssertEqual(items.count, RecentFolders.maxCount)
+        XCTAssertEqual(items.first?.url, RecentFolders.canonical(urls[9]))
+        XCTAssertEqual(items.last?.url, RecentFolders.canonical(urls[2]))
+
+        items = RecentFolders.inserting(urls[2], into: items)
+        XCTAssertEqual(items.count, RecentFolders.maxCount)
+        XCTAssertEqual(items.first?.url, RecentFolders.canonical(urls[2]))
+        XCTAssertEqual(items.filter { RecentFolders.canonical($0.url) == RecentFolders.canonical(urls[2]) }.count, 1)
+    }
+
+    func testRemoveAndTrailingSlashUnify() {
+        let a = URL(fileURLWithPath: "/tmp/pictool-recent-a")
+        let b = URL(fileURLWithPath: "/tmp/pictool-recent-b")
+        var items = RecentFolders.inserting(a, into: [])
+        items = RecentFolders.inserting(b, into: items)
+        items = RecentFolders.removing(URL(fileURLWithPath: "/tmp/pictool-recent-a/"), from: items)
+        XCTAssertEqual(items.map { RecentFolders.canonical($0.url) }, [RecentFolders.canonical(b)])
+    }
+
+    func testPersistRoundTripAndClear() throws {
+        let suite = "pictool.tests.recent.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pictool-recent-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let stored = RecentFolders.remember(dir, in: defaults)
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored[0].url, RecentFolders.canonical(dir))
+        XCTAssertNotNil(stored[0].bookmark)
+
+        let loaded = RecentFolders.load(from: defaults)
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].url, RecentFolders.canonical(dir))
+
+        RecentFolders.clear(in: defaults)
+        XCTAssertTrue(RecentFolders.load(from: defaults).isEmpty)
+    }
+
+    func testPathFallbackWhenBookmarkMissing() {
+        let suite = "pictool.tests.recent.path.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            XCTFail("suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let url = URL(fileURLWithPath: "/tmp/pictool-recent-fallback")
+        RecentFolders.save([RecentFolders.Item(url: url, bookmark: nil)], to: defaults)
+        let loaded = RecentFolders.load(from: defaults)
+        XCTAssertEqual(loaded.first?.url, RecentFolders.canonical(url))
+    }
+}
+
+/// P2-4 回归:内嵌缩略图小于请求尺寸时,快路径必须让位给整图缩放解码。
+/// 这一组测试同时把 ImageIO 的行为差异钉死,防止后续有人把回退分支改回 FromImageIfAbsent:true。
+final class ThumbnailEmbeddedFallbackTests: XCTestCase {
+
+    private var tempURLs: [URL] = []
+
+    override func tearDown() {
+        for url in tempURLs { try? FileManager.default.removeItem(at: url) }
+        tempURLs.removeAll()
+        super.tearDown()
+    }
+
+    /// 造一张 JPEG。embedThumbnail 为 true 时 CGImageDestination 会写入 EXIF 标准缩略图
+    /// (实测约 160×120),正是会发糊的那种。
+    private func makeJPEG(embedThumbnail: Bool, width: Int = 4000, height: Int = 3000) throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pictool-thumb-\(UUID().uuidString).jpg")
+        tempURLs.append(url)
+
+        let ctx = try XCTUnwrap(CGContext(data: nil, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        ctx.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try XCTUnwrap(ctx.makeImage())
+
+        let dest = try XCTUnwrap(CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        var props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.8]
+        if embedThumbnail { props[kCGImageDestinationEmbedThumbnail] = true }
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        return url
+    }
+
+    private func longEdge(of image: NSImage) -> CGFloat {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        return CGFloat(max(cg.width, cg.height))
+    }
+
+    /// 修复前:IfAbsent:false 命中 160×120 内嵌图就直接返回,长边 160 < 180,网格里被拉糊。
+    func testEmbeddedThumbnailSmallerThanRequestFallsBackToScaledDecode() throws {
+        let url = try makeJPEG(embedThumbnail: true)
+        let maxPixel: CGFloat = 180
+        let image = try XCTUnwrap(ThumbnailProvider.generate(url: url, maxPixel: maxPixel))
+        XCTAssertGreaterThanOrEqual(longEdge(of: image), maxPixel,
+                                    "内嵌缩略图小于请求尺寸时必须回退整图缩放解码")
+    }
+
+    /// 没有内嵌缩略图时本来就走缩放解码,不能被这次改动带崩。
+    func testNoEmbeddedThumbnailStillProducesRequestedSize() throws {
+        let url = try makeJPEG(embedThumbnail: false)
+        let maxPixel: CGFloat = 180
+        let image = try XCTUnwrap(ThumbnailProvider.generate(url: url, maxPixel: maxPixel))
+        XCTAssertGreaterThanOrEqual(longEdge(of: image), maxPixel)
+    }
+
+    /// 把「旧写法」钉在测试里:FromImageIfAbsent:true 同样逃不出内嵌图,
+    /// 所以它不能当回退分支用。若这条断言有一天失败,说明 ImageIO 行为变了,
+    /// 那时才可以简化 ThumbnailProvider.generate。
+    func testFromImageIfAbsentFallbackCannotEscapeEmbeddedThumbnail() throws {
+        let url = try makeJPEG(embedThumbnail: true)
+        let maxPixel: CGFloat = 180
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldCache: false,
+        ]
+        let cg = try XCTUnwrap(CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary))
+        XCTAssertLessThan(CGFloat(max(cg.width, cg.height)), maxPixel,
+                          "FromImageIfAbsent 已能拿到更大的图,可简化 generate 的回退分支")
+    }
+
+    /// 源图本身就小于请求尺寸时不能返回 nil,按原尺寸给即可。
+    func testSourceSmallerThanRequestReturnsSourceSize() throws {
+        let url = try makeJPEG(embedThumbnail: true, width: 120, height: 90)
+        let image = try XCTUnwrap(ThumbnailProvider.generate(url: url, maxPixel: 180))
+        XCTAssertGreaterThan(longEdge(of: image), 0)
+        XCTAssertLessThanOrEqual(longEdge(of: image), 180)
     }
 }

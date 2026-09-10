@@ -119,7 +119,9 @@ struct ImageViewCanvas: NSViewRepresentable {
         private var isRotatedBitmap = false
         private var mutatingCanvas = false
         private var lastNotifiedPercent = Int.min
-        private var escalateWork: DispatchWorkItem?
+        /// deinit 是 nonisolated 的,Swift 6 不允许它访问非 Sendable 的实例状态。
+        /// `DispatchWorkItem.cancel()` 本身线程安全,这里显式标注豁免即可。
+        nonisolated(unsafe) private var escalateWork: DispatchWorkItem?
 
         deinit {
             loadTask?.cancel()
@@ -227,9 +229,9 @@ struct ImageViewCanvas: NSViewRepresentable {
             NotificationCenter.default.addObserver(
                 forName: Notification.Name("PictoolSimPinch"), object: nil, queue: .main
             ) { [weak self] note in
+                let m = (note.userInfo?["m"] as? Double) ?? 1.5
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    let m = (note.userInfo?["m"] as? Double) ?? 1.5
                     self.debugLog("SIM pinch begin m=\(m)")
                     self.scrollView.magnification = CGFloat(m)
                     self.finishLiveMagnification()
@@ -242,19 +244,20 @@ struct ImageViewCanvas: NSViewRepresentable {
             NotificationCenter.default.addObserver(
                 forName: Notification.Name("PictoolSimAnchorPinch"), object: nil, queue: .main
             ) { [weak self] note in
+                // userInfo 是 NSDictionary(非 Sendable),必须在跨隔离边界之前
+                // 就把需要的标量取出来,只把 Sendable 的值带进 MainActor 闭包。
+                let u = note.userInfo ?? [:]
+                let ax = (u["ax"] as? Double) ?? 0.5
+                let ay = (u["ay"] as? Double) ?? 0.5
+                let steps = (u["steps"] as? Int) ?? 60
+                let factor = (u["factor"] as? Double) ?? 1.025
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    let u = note.userInfo ?? [:]
-                    let ax = (u["ax"] as? Double) ?? 0.5
-                    let ay = (u["ay"] as? Double) ?? 0.5
-                    let steps = (u["steps"] as? Int) ?? 60
-                    let factor = (u["factor"] as? Double) ?? 1.025
                     let clip = self.clipView.bounds
                     let anchor = CGPoint(x: clip.width * CGFloat(ax), y: clip.height * CGFloat(ay))
                     let startOrigin = self.clipView.bounds.origin
                     let startDoc = self.imageView.frame.size
                     let anchorDoc0 = CGPoint(x: anchor.x + startOrigin.x, y: anchor.y + startOrigin.y)
-                    var recordedDoc = startDoc
                     var step = 0
                     FileHandle.standardError.write(Data(
                         "[drift] begin anchor=(\(anchor.x),\(anchor.y)) origin=\(startOrigin) doc=\(startDoc)\n".utf8))
@@ -271,7 +274,6 @@ struct ImageViewCanvas: NSViewRepresentable {
                                                     y: anchorDoc0.y * totalRatio - anchor.y)
                                 let errX = o.x - ideal.x
                                 let errY = o.y - ideal.y
-                                recordedDoc = d
                                 if step % 10 == 0 || abs(errX) > 1 || abs(errY) > 1 {
                                     FileHandle.standardError.write(Data(
                                         "[drift] step=\(step) origin=(\(o.x),\(o.y)) ideal=(\(ideal.x),\(ideal.y)) err=(\(errX),\(errY)) doc=\(d.width)\n".utf8))

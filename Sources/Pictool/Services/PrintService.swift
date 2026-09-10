@@ -67,8 +67,9 @@ final class PrintPageView: NSView {
         return image.size
     }
 
-    /// 铺满整张纸所需的缩放(面板百分比 = 此值 × 100)
-    static func fitScale(imageSize: NSSize, paperSize: NSSize) -> CGFloat {
+    /// 铺满整张纸所需的缩放(面板百分比 = 此值 × 100)。
+    /// 纯几何,不碰 AppKit 状态,所以 nonisolated——单测与非 UI 代码都能直接调。
+    nonisolated static func fitScale(imageSize: NSSize, paperSize: NSSize) -> CGFloat {
         guard imageSize.width > 0, imageSize.height > 0, paperSize.width > 0, paperSize.height > 0 else {
             return 1
         }

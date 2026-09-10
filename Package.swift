@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
@@ -9,12 +9,14 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Pictool",
-            path: "Sources/Pictool"
+            path: "Sources/Pictool",
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "PictoolTests",
             dependencies: ["Pictool"],
-            path: "Tests/PictoolTests"
+            path: "Tests/PictoolTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]
 )

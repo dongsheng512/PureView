@@ -19,7 +19,7 @@ macOS 原生图片查看器 · Swift 6 + SwiftUI(混合 AppKit) · 零第三方�
 
 ## 功能
 
-- **文件夹浏览**：`NSOpenPanel` 多根项目侧栏 + 文件夹树懒加载 + `UTType.image` + `localizedStandardCompare` 自然排序
+- **文件夹浏览**：`NSOpenPanel` 多根项目侧栏 + 文件夹树懒加载 + `UTType.image` + `localizedStandardCompare` 自然排序；最近打开的文件夹（文件菜单 + 欢迎页，最多 8 条）
 - **缩略图网格**：边栏下半区 `LazyVGrid` 自适应，`CGImageSourceCreateThumbnailAtIndex` 降采样 + `NSCache(900/80MB)` + 合并重复请求，当前项高亮并自动滚动跟随
 - **流畅缩放**：`NSScrollView+NSImageView` 层托管 `CALayer(contents)`，触控板捏合 / `⌘/⌥+滚轮` 锚点缩放 / 拖拽平移 / 双击 `适配↔100%` / 横向主导滑动切图；大图按视口 `×2` 降采样，超阈值自动加载全尺寸无缝替换
 - **图片信息**：`CGImageSourceCopyPropertiesAtIndex` 一站式 EXIF/TIFF/IPTC/GPS/色彩/位深/DPI/帧数 + 文件信息，`Inspector` 可折叠 + 一键复制

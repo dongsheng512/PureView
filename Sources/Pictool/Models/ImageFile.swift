@@ -89,9 +89,8 @@ enum ImageDiscovery {
             includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
         ) else { return [] }
-        var candidates: [URL] = []
-        candidates.reserveCapacity(items.count)
-        let lock = NSLock()
+        let collected = Locked<[URL]>([])
+        collected.withLock { $0.reserveCapacity(items.count) }
         DispatchQueue.concurrentPerform(iterations: items.count) { i in
             let url = items[i]
             let ext = url.pathExtension.lowercased()
@@ -100,12 +99,10 @@ enum ImageDiscovery {
             if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { return }
             let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
             if values?.isRegularFile == true {
-                lock.lock()
-                candidates.append(url)
-                lock.unlock()
+                collected.withLock { $0.append(url) }
             }
         }
-        return candidates
+        return collected.read()
     }
 
     static func imageCount(in folder: URL) -> Int {
@@ -113,8 +110,7 @@ enum ImageDiscovery {
     }
 
     private static func makeRecords(_ urls: [URL], includeCapture: Bool) -> [SortRecord] {
-        var records = Array<SortRecord?>(repeating: nil, count: urls.count)
-        let lock = NSLock()
+        let records = Locked<[SortRecord?]>(Array(repeating: nil, count: urls.count))
         DispatchQueue.concurrentPerform(iterations: urls.count) { i in
             let url = urls[i]
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
@@ -124,11 +120,9 @@ enum ImageDiscovery {
                 size: Int64(values?.fileSize ?? 0),
                 captured: includeCapture ? MetadataService.captureDate(of: url) : nil
             )
-            lock.lock()
-            records[i] = record
-            lock.unlock()
+            records.withLock { $0[i] = record }
         }
-        return records.compactMap { $0 }
+        return records.read().compactMap { $0 }
     }
 
     /// 列出文件夹内的图片(不递归、跳过隐藏文件)
@@ -151,5 +145,33 @@ enum ImageDiscovery {
         return items
             .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
             .sorted { naturalLess($0.lastPathComponent, $1.lastPathComponent) }
+    }
+}
+
+/// 切文件夹扫盘的纯函数:generation 丢弃、hidden 过滤。单测覆盖。
+enum FolderListing {
+    /// 扫盘结果是否仍对应当前选中夹。generation 过期或已经切走则丢弃。
+    static func shouldApply(scanGeneration: Int, currentGeneration: Int,
+                            scanned: URL, selected: URL?) -> Bool {
+        guard scanGeneration == currentGeneration else { return false }
+        guard let selected else { return false }
+        return pathKey(scanned) == pathKey(selected)
+    }
+
+    static func pathKey(_ url: URL) -> String {
+        var path = url.standardizedFileURL.path
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        return path
+    }
+
+    /// hidden / urls 都按 pathKey 比较,兼容尾斜杠。
+    static func excludingHidden(_ urls: [URL], hidden: Set<URL>) -> [URL] {
+        guard !hidden.isEmpty else { return urls }
+        let keys = Set(hidden.map(pathKey))
+        return urls.filter { !keys.contains(pathKey($0)) }
+    }
+
+    static func pruneHidden(_ hidden: Set<URL>, onDisk: Set<URL>) -> Set<URL> {
+        hidden.intersection(onDisk)
     }
 }

@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import AppKit
+import Darwin
 
 @Observable
 final class FolderNode: Identifiable {
@@ -59,9 +60,9 @@ final class FolderStore {
     var isEditing = false
     /// 文字草稿输入中:裸键菜单(C/D 等)让位给文本输入
     var isTextDraftActive = false
-    /// 侧栏是否可见(普通模式;纯净模式下强制隐藏,退出后恢复)
-    var sidebarVisible = true
-    private var sidebarBeforeImmersive = true
+    /// 侧栏是否可见。启动默认收起,打开文件夹或点侧栏按钮后再展开。
+    var sidebarVisible = false
+    private var sidebarBeforeImmersive = false
 
     /// 切图到首尾后是否循环(偏好设置)
     var wrapNavigation: Bool = {
@@ -72,6 +73,8 @@ final class FolderStore {
     }()
     /// 当前列表排序(偏好设置;列表变更时沿用)
     private(set) var sortPreference = ImageSortPreference.load()
+    /// 最近打开的文件夹(落盘,最多 8 条)
+    private(set) var recentFolders: [RecentFolders.Item] = RecentFolders.load()
 
     /// 单张/少量打开模式：默认不加载同目录所有图片，侧边提示按需加载
     private(set) var isSingleImageMode = false
@@ -79,6 +82,12 @@ final class FolderStore {
     /// 文件夹图片总数缓存,避免 pendingOtherCount 每次扫盘
     private var folderImageCountCache: [URL: Int] = [:]
     private var sortGeneration = 0
+    /// 切夹/刷新扫盘代数;过期结果丢弃,避免快切时旧夹列表盖上来
+    private var folderScanGeneration = 0
+    /// 当前 `images` 对应的文件夹(standardized)。切到别的夹时先清空列表。
+    private var listedFolder: URL?
+    /// 后台正在枚举当前选中夹
+    private(set) var folderScanning = false
 
     /// 同目录还有多少张未加载。只读缓存,绝不在此触发扫盘——
     /// 这个属性被 body 直接求值,走主线程,上千文件的目录会卡住渲染。
@@ -95,6 +104,15 @@ final class FolderStore {
         return hiddenByFolder[standardized(folder)]?.count ?? 0
     }
 
+    /// 当前文件夹隐藏列表(按文件名自然排序)。会话内有效,不落盘。
+    var hiddenFilesInCurrentFolder: [URL] {
+        guard let folder = selectedFolder?.url else { return [] }
+        let set = hiddenByFolder[standardized(folder)] ?? []
+        return set.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+    }
+
     /// 恢复当前文件夹所有被隐藏的图片(隐藏仅作用于本次浏览)
     func unhideAllInCurrentFolder() {
         guard let node = selectedFolder else { return }
@@ -103,6 +121,19 @@ final class FolderStore {
         hiddenByFolder.removeValue(forKey: key)
         hiddenByFolderOrder.removeAll { $0 == key }
         selectFolder(node)
+    }
+
+    /// 单张取消隐藏并选中(文件已不在磁盘则只从 hidden 集合剔除)
+    func unhideImage(_ id: URL) {
+        guard let node = selectedFolder else { return }
+        let key = standardized(node.url)
+        let target = standardized(id)
+        hiddenByFolder[key]?.remove(target)
+        if hiddenByFolder[key]?.isEmpty == true {
+            hiddenByFolder.removeValue(forKey: key)
+            hiddenByFolderOrder.removeAll { $0 == key }
+        }
+        selectFolder(node, prefer: target)
     }
 
     private func rememberFolderCount(_ folder: URL, _ count: Int) {
@@ -130,6 +161,12 @@ final class FolderStore {
     func toggleSidebar() {
         guard !isImmersive else { return }
         sidebarVisible.toggle()
+    }
+
+    /// 打开文件夹/外部图后展开侧栏;纯净模式中不抢显示。
+    func revealSidebar() {
+        guard !isImmersive else { return }
+        sidebarVisible = true
     }
     private(set) var printRequestToken = 0
     private(set) var cropRequestToken = 0
@@ -233,9 +270,14 @@ final class FolderStore {
 
     /// folder -> 上次选中的图片,切回文件夹时恢复（key 已 standardized）
     private var selectionMemory: [URL: URL] = [:]
-    /// folder -> 被隐藏的图片(会话级,不写盘;刷新/重开 app 后恢复，最多 100 文件夹 LRU)
+    /// folder -> 被隐藏的图片(会话级,不写盘;重启后恢复。刷新不清空。最多 100 文件夹 LRU)
     private var hiddenByFolder: [URL: Set<URL>] = [:]
     private var hiddenByFolderOrder: [URL] = []
+    /// 当前选中目录的文件系统监听;只听这一层,事件合并后刷新
+    private var folderWatch: DispatchSourceFileSystemObject?
+    private var watchedFolder: URL?
+    private var folderWatchGeneration = 0
+    private var folderWatchPending = false
 
     private func standardized(_ url: URL) -> URL { url.standardizedFileURL }
     private func rememberHidden(folder: URL, id: URL) {
@@ -284,10 +326,32 @@ final class FolderStore {
         openFolder(url)
     }
 
-    func openFolder(_ url: URL) {
+    func openFolder(_ url: URL, prefer: URL? = nil) {
         isSingleImageMode = false
         singleImageSourceFolder = nil
-        selectFolder(ensureRoot(url))
+        selectFolder(ensureRoot(url), prefer: prefer)
+        recentFolders = RecentFolders.remember(url)
+        revealSidebar()
+    }
+
+    /// 从最近记录打开。路径不在则剔除并提示。
+    func openRecentFolder(_ url: URL) {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+            openFolder(url)
+            return
+        }
+        recentFolders = RecentFolders.remove(url)
+        let alert = NSAlert()
+        alert.messageText = "找不到该文件夹"
+        alert.informativeText = "“\(url.lastPathComponent)” 已从最近记录中移除。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }
+
+    func clearRecentFolders() {
+        RecentFolders.clear()
+        recentFolders = []
     }
 
     /// 打开外部图片文件（单张/少量）：默认仅加载所选图，侧边提示按需加载同目录其余图片
@@ -300,6 +364,7 @@ final class FolderStore {
             .map { $0.standardizedFileURL }
             .filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true }
         guard !imageURLs.isEmpty else { return }
+        revealSidebar()
         // 统一用 standardized，便于去重与比较
         let unique = ImageDiscovery.sorted(
             Array(Set(imageURLs)),
@@ -339,10 +404,7 @@ final class FolderStore {
         // 回退：同目录且已全选 / 单张且目录仅一张 → 直接走文件夹全量
         isSingleImageMode = false
         singleImageSourceFolder = nil
-        openFolder(firstFolder)
-        if let first = unique.first, images.contains(where: { $0.id == first }) {
-            selectImage(first)
-        }
+        openFolder(firstFolder, prefer: unique.first)
     }
 
     /// 同目录外部打开的三个分支:增量合并 / 已全量直接跳转 / 首次进入单图模式。
@@ -440,10 +502,7 @@ final class FolderStore {
         // 回退：同目录且已全选 / 单张且目录仅一张 → 直接走文件夹全量
         isSingleImageMode = false
         singleImageSourceFolder = nil
-        openFolder(firstFolder)
-        if let first = unique.first, images.contains(where: { $0.id == first }) {
-            selectImage(first)
-        }
+        openFolder(firstFolder, prefer: unique.first)
     }
 
     /// 单图模式下，按需加载同目录所有图片
@@ -453,29 +512,62 @@ final class FolderStore {
         isSingleImageMode = false
         singleImageSourceFolder = nil
         let node = ensureRoot(folder)
-        // selectFolder 会重算 images 并 cancel 队列
-        selectFolder(node)
-        if let cur = current, images.contains(where: { $0.id == cur }) {
-            selectImage(cur)
-        }
+        selectFolder(node, prefer: current)
     }
 
-    func selectFolder(_ node: FolderNode) {
+    func selectFolder(_ node: FolderNode, prefer: URL? = nil) {
         selectedFolderID = node.id
-        // 显式选文件夹即退出单图模式
         isSingleImageMode = false
         singleImageSourceFolder = nil
         let key = standardized(node.url)
-        let hidden = hiddenByFolder[key] ?? []
-        // 取消旧缩略图队列，避免 1000 张切盘时积压
+        if let prefer {
+            selectionMemory[key] = standardized(prefer)
+        }
         ThumbnailProvider.shared.cancelAll()
         DisplayImageCache.shared.cancelAll()
-        let urls = ImageDiscovery.imageURLs(in: node.url)
-        rememberFolderCount(node.url, urls.count)
-        applySortedURLs(
-            urls.filter { !hidden.contains(standardized($0)) },
-            remembered: selectionMemory[key]
-        )
+        startFolderWatch(node.url)
+
+        // 切到别的夹立刻清空,避免缩略图还显示上一夹;同一夹刷新则保留到新列表到达。
+        // 编辑中不清空,否则 currentImage 变 nil 会把 EditView 卸掉却留下 isEditing。
+        if listedFolder != key {
+            listedFolder = key
+            if !isEditing {
+                images = []
+                selectedImageID = nil
+                displayInfo = DisplayImageInfo()
+            }
+        }
+
+        folderScanGeneration += 1
+        let gen = folderScanGeneration
+        folderScanning = true
+        let remembered = selectionMemory[key]
+
+        Task { @MainActor in
+            let urls = await Task.detached(priority: .userInitiated) {
+                ImageDiscovery.imageURLs(in: key)
+            }.value
+            guard FolderListing.shouldApply(
+                scanGeneration: gen,
+                currentGeneration: self.folderScanGeneration,
+                scanned: key,
+                selected: self.selectedFolder?.url
+            ) else {
+                if gen == self.folderScanGeneration {
+                    self.folderScanning = false
+                }
+                return
+            }
+
+            self.rememberFolderCount(key, urls.count)
+            let onDisk = Set(urls.map { $0.standardizedFileURL })
+            self.applyPrunedHidden(folder: key, onDisk: onDisk)
+            let hiddenNow = self.hiddenByFolder[key] ?? []
+            let visible = FolderListing.excludingHidden(urls, hidden: hiddenNow)
+            self.listedFolder = key
+            self.folderScanning = false
+            self.applySortedURLs(visible, remembered: remembered)
+        }
     }
 
         /// 直选图片的所有路径统一走这里:切到不同图时丢弃当前图的旋转显示态
@@ -573,15 +665,69 @@ final class FolderStore {
         }
     }
 
-    /// 一期手动刷新当前文件夹(不做实时监听)。
-    /// 顺带清掉该文件夹的隐藏集合——否则隐藏在本次会话里无法撤销,只能重启 App。
+    /// 重扫当前文件夹。隐藏集合保留;磁盘上已消失的 hidden 条目在扫盘完成后剔除。
     func refreshCurrentFolder() {
         guard let node = selectedFolder else { return }
-        let key = standardized(node.url)
-        folderImageCountCache.removeValue(forKey: key)
-        hiddenByFolder.removeValue(forKey: key)
-        hiddenByFolderOrder.removeAll { $0 == key }
+        folderImageCountCache.removeValue(forKey: standardized(node.url))
         selectFolder(node)
+    }
+
+    private func applyPrunedHidden(folder: URL, onDisk: Set<URL>) {
+        let key = standardized(folder)
+        guard let hidden = hiddenByFolder[key] else { return }
+        let pruned = FolderListing.pruneHidden(hidden, onDisk: onDisk)
+        if pruned.isEmpty {
+            hiddenByFolder.removeValue(forKey: key)
+            hiddenByFolderOrder.removeAll { $0 == key }
+        } else {
+            hiddenByFolder[key] = pruned
+        }
+    }
+
+    private func startFolderWatch(_ url: URL) {
+        let key = standardized(url)
+        if watchedFolder == key, folderWatch != nil { return }
+        stopFolderWatch()
+        watchedFolder = key
+        var fd: Int32 = -1
+        key.withUnsafeFileSystemRepresentation { ptr in
+            guard let ptr else { return }
+            fd = Darwin.open(ptr, O_EVTONLY)
+        }
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .delete, .rename, .extend, .attrib],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            self?.scheduleFolderRefreshFromWatch()
+        }
+        source.setCancelHandler {
+            Darwin.close(fd)
+        }
+        source.resume()
+        folderWatch = source
+    }
+
+    private func stopFolderWatch() {
+        folderWatch?.cancel()
+        folderWatch = nil
+        watchedFolder = nil
+    }
+
+    private func scheduleFolderRefreshFromWatch() {
+        folderWatchGeneration += 1
+        let gen = folderWatchGeneration
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard gen == self.folderWatchGeneration else { return }
+            if self.isEditing {
+                self.folderWatchPending = true
+                return
+            }
+            self.refreshCurrentFolder()
+        }
     }
 
     // MARK: - 文件夹树
@@ -595,6 +741,9 @@ final class FolderStore {
 
     func removeRoot(id: FolderNode.ID) {
         roots.removeAll { $0.id == id }
+        if roots.isEmpty {
+            sidebarVisible = false
+        }
         guard selectedFolderID == id else { return }
         selectedFolderID = nil
         images = []
@@ -660,6 +809,10 @@ final class FolderStore {
         isEditing = false
         isModalPresented = false
         isTextDraftActive = false
+        if folderWatchPending {
+            folderWatchPending = false
+            refreshCurrentFolder()
+        }
     }
 
     // MARK: - 缩略图右键操作(复制 / 隐藏 / 删除)

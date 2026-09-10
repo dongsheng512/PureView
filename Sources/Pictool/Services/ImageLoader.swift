@@ -171,19 +171,33 @@ final class DisplayImageCache: @unchecked Sendable {
     private let cache = NSCache<NSURL, DisplayImageRecord>()
     private let lock = NSLock()
     private var inFlight: [NSURL: [(DisplayImageRecord?) -> Void]] = [:]
+    /// 内存压力源必须强持有,否则会被立刻释放、回调永不触发
+    private var pressureSource: DispatchSourceMemoryPressure?
 
     init() {
-        // 6 张 + 250MB 上限，避免 1000 张 40MP 预取撑爆 500MB 红线；NSCache 会在压力下自动逐出
+        // 12 张 + 250MB 上限，避免 1000 张 40MP 预取撑爆 500MB 红线
         cache.countLimit = 12
         cache.totalCostLimit = 250 * 1024 * 1024
         cache.evictsObjectsWithDiscardedContent = true
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.trimIfNeeded() }
+        installMemoryPressureSource()
     }
 
-    func trimIfNeeded() {
-        // 后台回前台时若内存紧张，NSCache 已自动逐出；此处仅作兜底日志
+    /// 系统一报警就主动放。之前这里只有一个空方法体,等于完全依赖 NSCache 自行逐出——
+    /// 而逐出时机由系统决定,并不保证及时。
+    private func installMemoryPressureSource() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical], queue: .main
+        )
+        source.setEventHandler { [weak self, weak source] in
+            guard let self, let source else { return }
+            if source.data.contains(.critical) {
+                self.clearIfMemoryPressure()      // 连进行中的解码请求一起放弃
+            } else {
+                self.cache.removeAllObjects()     // warning 只丢已解码结果
+            }
+        }
+        source.resume()
+        pressureSource = source
     }
 
     func cancelAll() {

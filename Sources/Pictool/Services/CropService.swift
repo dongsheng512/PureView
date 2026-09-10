@@ -417,7 +417,9 @@ enum CropService {
                 bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
             ) {
                 ctx.draw(canvas, in: CGRect(origin: .zero, size: size))
-                AnnotationRenderer.draw(annotations, in: ctx, canvasSize: size, base: canvas)
+                // 导出只画这一次,base 又是全尺寸位图:不进效果缓存,避免它被长期驻留
+                AnnotationRenderer.draw(annotations, in: ctx, canvasSize: size, base: canvas,
+                                        cacheEffects: false)
                 if let stamped = ctx.makeImage() { canvas = stamped }
             }
         }

@@ -87,6 +87,21 @@ struct PictoolApp: App {
                 Button("刷新") { store.refreshCurrentFolder() }
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(store.selectedFolder == nil || store.isModalPresented)
+                Menu("最近打开的文件夹") {
+                    if store.recentFolders.isEmpty {
+                        Button("无记录") {}
+                            .disabled(true)
+                    } else {
+                        ForEach(store.recentFolders) { item in
+                            Button(item.name) { store.openRecentFolder(item.url) }
+                                .help(item.displayPath)
+                                .disabled(store.isModalPresented)
+                        }
+                    }
+                    Divider()
+                    Button("清除最近记录") { store.clearRecentFolders() }
+                        .disabled(store.recentFolders.isEmpty)
+                }
             }
             CommandGroup(replacing: .printItem) {
                 Button("打印…") { store.requestPrint() }

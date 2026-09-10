@@ -17,17 +17,24 @@ struct Annotation: Identifiable, Equatable, Sendable {
 
     enum Kind: Equatable, Sendable {
         /// 锚点为文字块左上角(归一化);sizeFraction = 字号/画布宽(连续,三档 chip 是预设)
-        case text(anchor: CGPoint, content: String, sizeFraction: CGFloat, colorIndex: Int)
+        case text(anchor: CGPoint, content: String, sizeFraction: CGFloat, color: MarkupColor)
         /// 笔迹;style 决定实线或荧光(半透明、更宽)
-        case stroke(points: [CGPoint], widthLevel: Int, colorIndex: Int, style: StrokeStyleKind)
+        case stroke(points: [CGPoint], widthLevel: Int, color: MarkupColor, style: StrokeStyleKind)
         /// 笔迹 = 效果蒙版;effect 决定蒙版下显示像素化还是模糊底图
         case mosaic(points: [CGPoint], widthLevel: Int, effect: MosaicEffect)
         /// 形状(B2):只描边;rect/ellipse 用 from/to 对角点,line/arrow 用两端点(arrow 指向 to)
-        case shape(kind: ShapeKind, from: CGPoint, to: CGPoint, widthLevel: Int, colorIndex: Int)
+        case shape(kind: ShapeKind, from: CGPoint, to: CGPoint, widthLevel: Int, color: MarkupColor)
     }
 }
 
 /// 笔迹样式:实线 / 荧光笔(半透明、更宽)
+enum MarkupColor: Equatable, Sendable, Hashable {
+    case palette(Int)
+    case custom(r: Double, g: Double, b: Double)
+
+    static let red = MarkupColor.palette(2)
+}
+
 enum StrokeStyleKind: String, CaseIterable, Identifiable, Sendable {
     case solid
     case highlighter
@@ -72,6 +79,27 @@ enum ShapeKind: String, CaseIterable, Identifiable, Sendable {
         case .arrow: "箭头"
         }
     }
+
+    var systemImage: String {
+        switch self {
+        case .line: "line.diagonal"
+        case .arrow: "line.diagonal.arrow"
+        case .rect: "rectangle"
+        case .ellipse: "circle"
+        }
+    }
+
+    /// 选择面板排列:与预览.app 同类,先线后封闭形
+    static let pickerOrder: [ShapeKind] = [.line, .arrow, .rect, .ellipse]
+}
+
+enum ShapeCorner: Equatable, Sendable { case nw, ne, sw, se }
+enum ShapeEdge: Equatable, Sendable { case n, s, w, e }
+enum ShapeHandle: Equatable, Sendable {
+    case corner(ShapeCorner)
+    case edge(ShapeEdge)
+    /// true = from 端, false = to 端
+    case endpoint(Bool)
 }
 
 enum MosaicEffect: String, CaseIterable, Identifiable, Sendable {
@@ -84,17 +112,54 @@ enum MosaicEffect: String, CaseIterable, Identifiable, Sendable {
 /// 标记工具共享的调色盘与档位(千分比表)。档位取值越界时夹到合法区间。
 enum MarkPalette {
 
+    /// 24 种常用色。前 6 个下标保持历史语义(黑/白/红/黄/绿/蓝)。
     static let colors: [NSColor] = [
         .black,
         .white,
-        NSColor(red: 0.90, green: 0.18, blue: 0.16, alpha: 1),
-        NSColor(red: 0.98, green: 0.76, blue: 0.04, alpha: 1),
-        NSColor(red: 0.13, green: 0.64, blue: 0.29, alpha: 1),
-        NSColor(red: 0.13, green: 0.42, blue: 0.92, alpha: 1),
+        NSColor(srgbRed: 0.90, green: 0.18, blue: 0.16, alpha: 1),
+        NSColor(srgbRed: 0.98, green: 0.76, blue: 0.04, alpha: 1),
+        NSColor(srgbRed: 0.13, green: 0.64, blue: 0.29, alpha: 1),
+        NSColor(srgbRed: 0.13, green: 0.42, blue: 0.92, alpha: 1),
+        NSColor(srgbRed: 0.96, green: 0.49, blue: 0.13, alpha: 1),
+        NSColor(srgbRed: 0.56, green: 0.27, blue: 0.68, alpha: 1),
+        NSColor(srgbRed: 0.91, green: 0.45, blue: 0.62, alpha: 1),
+        NSColor(srgbRed: 0.55, green: 0.35, blue: 0.17, alpha: 1),
+        NSColor(srgbRed: 0.55, green: 0.55, blue: 0.57, alpha: 1),
+        NSColor(srgbRed: 0.18, green: 0.72, blue: 0.78, alpha: 1),
+        NSColor(srgbRed: 0.63, green: 0.09, blue: 0.12, alpha: 1),
+        NSColor(srgbRed: 0.85, green: 0.65, blue: 0.13, alpha: 1),
+        NSColor(srgbRed: 0.55, green: 0.76, blue: 0.29, alpha: 1),
+        NSColor(srgbRed: 0.10, green: 0.22, blue: 0.49, alpha: 1),
+        NSColor(srgbRed: 0.78, green: 0.16, blue: 0.48, alpha: 1),
+        NSColor(srgbRed: 0.09, green: 0.48, blue: 0.47, alpha: 1),
+        NSColor(srgbRed: 0.29, green: 0.29, blue: 0.30, alpha: 1),
+        NSColor(srgbRed: 0.82, green: 0.82, blue: 0.84, alpha: 1),
+        NSColor(srgbRed: 0.94, green: 0.38, blue: 0.35, alpha: 1),
+        NSColor(srgbRed: 0.42, green: 0.48, blue: 0.19, alpha: 1),
+        NSColor(srgbRed: 0.40, green: 0.68, blue: 0.90, alpha: 1),
+        NSColor(srgbRed: 0.29, green: 0.22, blue: 0.55, alpha: 1),
     ]
 
     static func color(_ index: Int) -> NSColor {
         colors.indices.contains(index) ? colors[index] : .black
+    }
+
+    static func nsColor(_ color: MarkupColor) -> NSColor {
+        switch color {
+        case .palette(let index):
+            return Self.color(index)
+        case .custom(let r, let g, let b):
+            return NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
+        }
+    }
+
+    static func isLight(_ color: MarkupColor) -> Bool {
+        luminance(of: nsColor(color)) > 0.65
+    }
+
+    static func luminance(of ns: NSColor) -> CGFloat {
+        let rgb = ns.usingColorSpace(.sRGB) ?? ns
+        return 0.2126 * rgb.redComponent + 0.7152 * rgb.greenComponent + 0.0722 * rgb.blueComponent
     }
 
     static let textSizes: [CGFloat] = [0.030, 0.048, 0.070]
@@ -133,7 +198,7 @@ enum MarkPalette {
 
     /// 白(1)、黄(3)为浅色,描边用近黑;其余近白。
     static func isLightColor(_ index: Int) -> Bool {
-        index == 1 || index == 3
+        isLight(.palette(index))
     }
 }
 
@@ -191,6 +256,34 @@ enum MarkupGeometry {
         return points.map { CGPoint(x: $0.x + shiftX, y: $0.y + shiftY) }
     }
 
+    /// 粘贴副本时的默认位移(归一化)
+    static let pasteNudge: CGFloat = 0.03
+
+    /// 平移整枚图元并夹回单位矩形;载荷(色/宽/样式)不变。
+    static func offset(_ kind: Annotation.Kind, dx: CGFloat, dy: CGFloat) -> Annotation.Kind {
+        switch kind {
+        case let .text(anchor, content, sizeFraction, color):
+            return .text(
+                anchor: moved(anchor: anchor, by: CGSize(width: dx, height: dy)),
+                content: content, sizeFraction: sizeFraction, color: color
+            )
+        case let .stroke(points, widthLevel, color, style):
+            return .stroke(
+                points: clampedTranslate(points: points, dx: dx, dy: dy),
+                widthLevel: widthLevel, color: color, style: style
+            )
+        case let .mosaic(points, widthLevel, effect):
+            return .mosaic(
+                points: clampedTranslate(points: points, dx: dx, dy: dy),
+                widthLevel: widthLevel, effect: effect
+            )
+        case let .shape(kind, from, to, widthLevel, color):
+            let pts = clampedTranslate(points: [from, to], dx: dx, dy: dy)
+            return .shape(kind: kind, from: pts[0], to: pts[1],
+                          widthLevel: widthLevel, color: color)
+        }
+    }
+
     // MARK: 形状(B2)
 
     /// from/to 对角点转正矩形(负宽高翻转)
@@ -237,6 +330,152 @@ enum MarkupGeometry {
         guard maxX > minX, maxY > minY else { return nil }
         return CGRect(x: minX - pad, y: minY - pad,
                       width: maxX - minX + pad * 2, height: maxY - minY + pad * 2)
+    }
+
+    static let shapeMinSize: CGFloat = 0.01
+
+    static func clampUnit(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: min(max(0, p.x), 1), y: min(max(0, p.y), 1))
+    }
+
+    static func shapeHandles(kind: ShapeKind, from: CGPoint, to: CGPoint) -> [(ShapeHandle, CGPoint)] {
+        switch kind {
+        case .line, .arrow:
+            return [(.endpoint(true), from), (.endpoint(false), to)]
+        case .ellipse:
+            // 轴对齐椭圆与包围盒四边中点相切,手柄落在椭圆上,不落在角上。
+            let r = standardizedRect(from: from, to: to)
+            return [
+                (.edge(.n), CGPoint(x: r.midX, y: r.minY)),
+                (.edge(.e), CGPoint(x: r.maxX, y: r.midY)),
+                (.edge(.s), CGPoint(x: r.midX, y: r.maxY)),
+                (.edge(.w), CGPoint(x: r.minX, y: r.midY)),
+            ]
+        case .rect:
+            let r = standardizedRect(from: from, to: to)
+            return [
+                (.corner(.nw), CGPoint(x: r.minX, y: r.minY)),
+                (.corner(.ne), CGPoint(x: r.maxX, y: r.minY)),
+                (.corner(.se), CGPoint(x: r.maxX, y: r.maxY)),
+                (.corner(.sw), CGPoint(x: r.minX, y: r.maxY)),
+                (.edge(.n), CGPoint(x: r.midX, y: r.minY)),
+                (.edge(.e), CGPoint(x: r.maxX, y: r.midY)),
+                (.edge(.s), CGPoint(x: r.midX, y: r.maxY)),
+                (.edge(.w), CGPoint(x: r.minX, y: r.midY)),
+            ]
+        }
+    }
+
+    static func hitShapeHandle(kind: ShapeKind, from: CGPoint, to: CGPoint,
+                               at point: CGPoint, tolerance: CGFloat) -> ShapeHandle? {
+        var best: ShapeHandle?
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for (handle, p) in shapeHandles(kind: kind, from: from, to: to) {
+            let d = hypot(point.x - p.x, point.y - p.y)
+            if d <= tolerance, d < bestDist {
+                bestDist = d
+                best = handle
+            }
+        }
+        return best
+    }
+
+    static func reshaped(kind: ShapeKind, from: CGPoint, to: CGPoint,
+                         handle: ShapeHandle, to point: CGPoint,
+                         lockAspect: Bool) -> (from: CGPoint, to: CGPoint) {
+        let p = clampUnit(point)
+        switch kind {
+        case .line, .arrow:
+            switch handle {
+            case .endpoint(true):
+                return minLengthLine(from: p, to: to)
+            case .endpoint(false):
+                return minLengthLine(from: from, to: p)
+            default:
+                return (from, to)
+            }
+        case .rect, .ellipse:
+            return reshapedRect(from: from, to: to, handle: handle, point: p, lockAspect: lockAspect)
+        }
+    }
+
+    private static func minLengthLine(from a: CGPoint, to b: CGPoint) -> (from: CGPoint, to: CGPoint) {
+        let a = clampUnit(a), b = clampUnit(b)
+        let dx = b.x - a.x, dy = b.y - a.y
+        let len = hypot(dx, dy)
+        if len >= shapeMinSize { return (a, b) }
+        if len < 1e-8 {
+            let next = clampUnit(CGPoint(x: a.x + shapeMinSize, y: a.y))
+            if next.x - a.x < shapeMinSize / 2 {
+                return (clampUnit(CGPoint(x: a.x - shapeMinSize, y: a.y)), a)
+            }
+            return (a, next)
+        }
+        let scale = shapeMinSize / len
+        return (a, clampUnit(CGPoint(x: a.x + dx * scale, y: a.y + dy * scale)))
+    }
+
+    private static func reshapedRect(from: CGPoint, to: CGPoint, handle: ShapeHandle,
+                                     point p: CGPoint, lockAspect: Bool) -> (from: CGPoint, to: CGPoint) {
+        let r0 = standardizedRect(from: from, to: to)
+        let ratio = r0.height > 1e-8 ? r0.width / r0.height : 1
+        var minX = r0.minX, maxX = r0.maxX, minY = r0.minY, maxY = r0.maxY
+        switch handle {
+        case .corner(.nw): minX = p.x; minY = p.y
+        case .corner(.ne): maxX = p.x; minY = p.y
+        case .corner(.se): maxX = p.x; maxY = p.y
+        case .corner(.sw): minX = p.x; maxY = p.y
+        case .edge(.n): minY = p.y
+        case .edge(.s): maxY = p.y
+        case .edge(.w): minX = p.x
+        case .edge(.e): maxX = p.x
+        default:
+            return (from, to)
+        }
+        if lockAspect, case .corner = handle {
+            var w = maxX - minX
+            var h = maxY - minY
+            let signW: CGFloat = w < 0 ? -1 : 1
+            let signH: CGFloat = h < 0 ? -1 : 1
+            w = abs(w); h = abs(h)
+            if w / max(h, 1e-8) > ratio {
+                h = w / ratio
+            } else {
+                w = h * ratio
+            }
+            switch handle {
+            case .corner(.nw):
+                minX = maxX - signW * w
+                minY = maxY - signH * h
+            case .corner(.ne):
+                maxX = minX + signW * w
+                minY = maxY - signH * h
+            case .corner(.se):
+                maxX = minX + signW * w
+                maxY = minY + signH * h
+            case .corner(.sw):
+                minX = maxX - signW * w
+                maxY = minY + signH * h
+            default: break
+            }
+        }
+        if maxX < minX { swap(&minX, &maxX) }
+        if maxY < minY { swap(&minY, &maxY) }
+        if maxX - minX < shapeMinSize {
+            let mid = (minX + maxX) / 2
+            minX = mid - shapeMinSize / 2
+            maxX = mid + shapeMinSize / 2
+        }
+        if maxY - minY < shapeMinSize {
+            let mid = (minY + maxY) / 2
+            minY = mid - shapeMinSize / 2
+            maxY = mid + shapeMinSize / 2
+        }
+        minX = min(max(0, minX), 1 - shapeMinSize)
+        minY = min(max(0, minY), 1 - shapeMinSize)
+        maxX = min(max(minX + shapeMinSize, maxX), 1)
+        maxY = min(max(minY + shapeMinSize, maxY), 1)
+        return (CGPoint(x: minX, y: minY), CGPoint(x: maxX, y: maxY))
     }
 
     /// 形状命中:rect/ellipse 按 bounds 内含(便于移动);line/arrow 按线段距离,箭头另含头部三角
@@ -334,20 +573,44 @@ enum MarkupGeometry {
     static func flipH(_ p: CGPoint) -> CGPoint { CGPoint(x: 1 - p.x, y: p.y) }
     static func flipV(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x, y: 1 - p.y) }
 
+    // MARK: 选区的同套映射
+    //
+    // 裁切选区与标注在同一套归一化空间,变换时必须一起映射:否则内容跟着转、
+    // 选区不动,导出会裁到完全不是用户框的那一块。
+    // 闭式公式由「四角点各自套上面的点变换后取包围盒」推导,并逐位校验过。
+
+    /// 顺时针 90°:归一化矩形 (x, y, w, h) → (1−y−h, x, h, w)
+    static func mappedRectCW90(_ r: CGRect) -> CGRect {
+        CGRect(x: 1 - r.maxY, y: r.minX, width: r.height, height: r.width)
+    }
+
+    /// 逆时针 90°
+    static func mappedRectCCW90(_ r: CGRect) -> CGRect {
+        CGRect(x: r.minY, y: 1 - r.maxX, width: r.height, height: r.width)
+    }
+
+    static func mappedRectFlipH(_ r: CGRect) -> CGRect {
+        CGRect(x: 1 - r.maxX, y: r.minY, width: r.width, height: r.height)
+    }
+
+    static func mappedRectFlipV(_ r: CGRect) -> CGRect {
+        CGRect(x: r.minX, y: 1 - r.maxY, width: r.width, height: r.height)
+    }
+
     static func mapped(_ annotation: Annotation, _ transform: (CGPoint) -> CGPoint) -> Annotation {
         var next = annotation
         switch annotation.kind {
-        case let .text(anchor, content, sizeFraction, colorIndex):
+        case let .text(anchor, content, sizeFraction, color):
             next.kind = .text(anchor: transform(anchor), content: content,
-                              sizeFraction: sizeFraction, colorIndex: colorIndex)
-        case let .stroke(points, widthLevel, colorIndex, style):
+                              sizeFraction: sizeFraction, color: color)
+        case let .stroke(points, widthLevel, color, style):
             next.kind = .stroke(points: points.map(transform), widthLevel: widthLevel,
-                                colorIndex: colorIndex, style: style)
+                                color: color, style: style)
         case let .mosaic(points, widthLevel, effect):
             next.kind = .mosaic(points: points.map(transform), widthLevel: widthLevel, effect: effect)
-        case let .shape(kind, from, to, widthLevel, colorIndex):
+        case let .shape(kind, from, to, widthLevel, color):
             next.kind = .shape(kind: kind, from: transform(from), to: transform(to),
-                               widthLevel: widthLevel, colorIndex: colorIndex)
+                               widthLevel: widthLevel, color: color)
         }
         return next
     }

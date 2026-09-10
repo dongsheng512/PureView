@@ -17,6 +17,18 @@ xcuserdata/
 .mimosa/
 .workbuddy/
 
+# 本地工作文档:只留本地,不随仓库分发、不推 GitHub
+# (约束/计划/审查/分析类。新增这类文档时往下加一行。README.md 不属此类)
+AGENTS.md
+NEXT_PLAN.md
+PLAN.md
+MARKUP_PLAN.md
+EDIT_UX_PLAN.md
+CODE_REVIEW.md
+FIX_PLAN.md
+FEATURE_ANALYSIS.md
+ROADMAP.md
+
 # Editor
 .vscode/
 .idea/

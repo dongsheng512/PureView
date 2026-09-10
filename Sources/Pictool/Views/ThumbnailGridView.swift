@@ -18,17 +18,30 @@ struct ThumbnailGridView: View {
                     .font(.callout.weight(.semibold))
                     .monospacedDigit()
                     .lineLimit(1)
+                if store.folderScanning {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
                 Spacer()
                 if store.hiddenCountInCurrentFolder > 0 {
-                    Button {
-                        store.unhideAllInCurrentFolder()
+                    Menu {
+                        ForEach(store.hiddenFilesInCurrentFolder, id: \.self) { url in
+                            Button(url.lastPathComponent) {
+                                store.unhideImage(url)
+                            }
+                        }
+                        Divider()
+                        Button("全部恢复") {
+                            store.unhideAllInCurrentFolder()
+                        }
                     } label: {
-                        Text("已隐藏 \(store.hiddenCountInCurrentFolder) · 恢复")
+                        Text("已隐藏 \(store.hiddenCountInCurrentFolder)")
                             .font(.caption)
                     }
-                    .buttonStyle(.plain)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                     .foregroundStyle(Color.accentColor)
-                    .help("恢复本文件夹中被隐藏的图片")
+                    .help("显示被隐藏的图片,或全部恢复")
                 }
                 Image(systemName: expanded ? "chevron.down" : "chevron.up")
                     .font(.system(size: 11, weight: .medium))
@@ -47,7 +60,11 @@ struct ThumbnailGridView: View {
             )
             .padding(.horizontal, 4)
 
-            if store.images.isEmpty {
+            if store.folderScanning && store.images.isEmpty {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if store.images.isEmpty {
                 // 空态:一张虚线描边的“空缩略图”占位;已选文件夹但无图时才补文字说明
                 VStack(spacing: 10) {
                     EmptyThumbnailPlaceholder()

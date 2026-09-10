@@ -124,6 +124,128 @@ enum SidebarTopStyle: String, CaseIterable, Identifiable {
     }
 }
 
+/// 最近打开的文件夹。UserDefaults 存书签 Data + path 回退,最多 8 条。
+enum RecentFolders {
+    static let storageKey = "recentFolders"
+    static let maxCount = 8
+
+    struct Item: Equatable, Identifiable, Sendable {
+        var url: URL
+        var bookmark: Data?
+
+        var id: String { canonical(url).path }
+
+        var name: String {
+            let n = url.lastPathComponent
+            return n.isEmpty ? url.path : n
+        }
+
+        var displayPath: String { url.path }
+    }
+
+    /// 目录身份:标准化 + 统一成 isDirectory,避免 `/foo` 与 `/foo/` 各占一条。
+    static func canonical(_ url: URL) -> URL {
+        var path = url.standardizedFileURL.path
+        while path.count > 1, path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    struct Record: Codable, Equatable {
+        var path: String
+        var bookmark: Data?
+    }
+
+    /// 插入列表头、按标准化路径去重、截断。纯函数,单测覆盖。
+    static func inserting(_ url: URL, into items: [Item], bookmark: Data? = nil,
+                          maxCount: Int = maxCount) -> [Item] {
+        let key = canonical(url)
+        var next = items.filter { canonical($0.url) != key }
+        next.insert(Item(url: key, bookmark: bookmark), at: 0)
+        if next.count > maxCount {
+            next = Array(next.prefix(maxCount))
+        }
+        return next
+    }
+
+    static func removing(_ url: URL, from items: [Item]) -> [Item] {
+        let key = canonical(url)
+        return items.filter { canonical($0.url) != key }
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> [Item] {
+        guard let data = defaults.data(forKey: storageKey),
+              let records = try? JSONDecoder().decode([Record].self, from: data) else {
+            return []
+        }
+        var items: [Item] = []
+        var seen = Set<String>()
+        for record in records {
+            guard let item = resolve(record) else { continue }
+            let path = canonical(item.url).path
+            if seen.contains(path) { continue }
+            seen.insert(path)
+            items.append(item)
+            if items.count == maxCount { break }
+        }
+        return items
+    }
+
+    static func remember(_ url: URL, in defaults: UserDefaults = .standard) -> [Item] {
+        let standardized = canonical(url)
+        let bookmark = try? standardized.bookmarkData(
+            options: [],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        let items = inserting(standardized, into: load(from: defaults), bookmark: bookmark)
+        save(items, to: defaults)
+        return items
+    }
+
+    static func remove(_ url: URL, from defaults: UserDefaults = .standard) -> [Item] {
+        let items = removing(url, from: load(from: defaults))
+        save(items, to: defaults)
+        return items
+    }
+
+    static func clear(in defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: storageKey)
+    }
+
+    static func save(_ items: [Item], to defaults: UserDefaults) {
+        let records = items.map { Record(path: $0.url.path, bookmark: $0.bookmark) }
+        defaults.set(try? JSONEncoder().encode(records), forKey: storageKey)
+    }
+
+    /// 书签能解析则用解析结果(卷重挂后路径可能变);否则回退 path。
+    static func resolve(_ record: Record) -> Item? {
+        if let data = record.bookmark {
+            var stale = false
+            if let resolved = try? URL(
+                resolvingBookmarkData: data,
+                options: [],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            ) {
+                let url = canonical(resolved)
+                var bookmark = data
+                if stale {
+                    bookmark = (try? url.bookmarkData(
+                        options: [],
+                        includingResourceValuesForKeys: nil,
+                        relativeTo: nil
+                    )) ?? data
+                }
+                return Item(url: url, bookmark: bookmark)
+            }
+        }
+        guard !record.path.isEmpty else { return nil }
+        return Item(url: canonical(URL(fileURLWithPath: record.path)), bookmark: record.bookmark)
+    }
+}
+
 /// 切图下标换算(纯函数,单测覆盖循环/夹取)
 enum ImageNavigation {
     /// 返回下一张下标;越界且不循环时返回 nil。单张循环时仍返回 0。

@@ -288,7 +288,9 @@ struct CanvasMouseCatcher: NSViewRepresentable {
         private var hovering = false
         private var spaceDown = false
         private var panStart: CGPoint?
-        private var keyMonitor: Any?
+        /// deinit 是 nonisolated 的,Swift 6 不允许它调用 MainActor 隔离的 `removeKeyMonitor()`。
+        /// `NSEvent.removeMonitor` 本身线程安全,这里显式标注豁免,并在 deinit 里直接摘除。
+        nonisolated(unsafe) private var keyMonitor: Any?
 
         override var isFlipped: Bool { true }
         override var mouseDownCanMoveWindow: Bool { false }
@@ -329,7 +331,9 @@ struct CanvasMouseCatcher: NSViewRepresentable {
             }
         }
 
-        deinit { removeKeyMonitor() }
+        deinit {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        }
 
         override func updateTrackingAreas() {
             super.updateTrackingAreas()
@@ -542,8 +546,13 @@ struct WatermarkStampLayer: View {
 
     private var stamp: NSImage? {
         // 量化尺寸,拖选框时不要每像素重烙一遍。
-        let width = max(64, min(1200, (frame.width * 2 / 8).rounded() * 8))
-        let height = max(64, min(1200, (width * frame.height / max(frame.width, 1) / 8).rounded() * 8))
+        // 关键:**两个方向共用一个缩放系数**。早先是各自夹到 1200,竖构图的裁切框
+        // (如 300×1200)栅格会变成 600×1200,而 SwiftUI 侧按 frame 硬拉伸,
+        // 水印字形被纵向拉长最多 2 倍。统一系数后比例天然守恒,只剩 8px 网格的量化误差。
+        let grid: CGFloat = 8
+        let k = min(1, 1200 / max(frame.width * 2, frame.height * 2, 1))
+        let width = max(grid, (frame.width * 2 * k / grid).rounded() * grid)
+        let height = max(grid, (frame.height * 2 * k / grid).rounded() * grid)
         let key = stampKey(width: Int(width), height: Int(height))
         if let cached = Self.cache.object(forKey: key) { return cached }
         guard let cg = WatermarkRenderer.overlay(

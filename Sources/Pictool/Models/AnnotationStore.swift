@@ -5,6 +5,8 @@ import Foundation
 @Observable
 final class AnnotationStore {
     private var items: [String: [Annotation]] = [:]
+    /// 编辑器 ⌘C/⌘V 的内存剪贴板(不写系统粘贴板,退出即丢)
+    private(set) var clipboard: Annotation?
 
     func annotations(for url: URL) -> [Annotation] {
         items[Self.storageKey(for: url)] ?? []
@@ -17,6 +19,10 @@ final class AnnotationStore {
         } else {
             items[key] = annotations
         }
+    }
+
+    func copyToClipboard(_ annotation: Annotation) {
+        clipboard = annotation
     }
 
     /// 去掉尾斜杠,避免 `/tmp/a.jpg` 与 `/tmp/a.jpg/` 各存一份。

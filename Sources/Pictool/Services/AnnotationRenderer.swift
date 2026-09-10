@@ -10,8 +10,12 @@ enum AnnotationRenderer {
 
     /// 把标记画进任意 CG 上下文。`ctx` 为常规方向(y 向上);`base` 仅在含马赛克时需要,
     /// 用于生成像素化/模糊效果底图。
+    ///
+    /// - Parameter cacheEffects: 是否把效果底图写入跨调用的 `effectCache`。
+    ///   画布拖动时每帧一次 `draw`,靠这个缓存才不卡;而导出只调用一次、
+    ///   且 `base` 是全尺寸位图(24MP 单条 ≈192MB),缓存纯属留垃圾,传 `false`。
     static func draw(_ annotations: [Annotation], in ctx: CGContext,
-                     canvasSize: CGSize, base: CGImage?) {
+                     canvasSize: CGSize, base: CGImage?, cacheEffects: Bool = true) {
         guard !annotations.isEmpty, canvasSize.width > 0, canvasSize.height > 0 else { return }
         ctx.saveGState()
         // 进入显示坐标(y 向下),后续所有归一化坐标直接乘画幅
@@ -21,15 +25,15 @@ enum AnnotationRenderer {
         var blurCache: [CGFloat: CGImage] = [:]
         for annotation in annotations {
             switch annotation.kind {
-            case let .text(anchor, content, sizeFraction, colorIndex):
+            case let .text(anchor, content, sizeFraction, color):
                 drawText(content, sizeFraction: MarkPalette.clampTextFraction(sizeFraction),
-                         colorIndex: colorIndex, topLeft: anchor, in: ctx, canvasSize: canvasSize)
-            case let .stroke(points, widthLevel, colorIndex, style):
+                         color: color, topLeft: anchor, in: ctx, canvasSize: canvasSize)
+            case let .stroke(points, widthLevel, color, style):
                 let width = MarkPalette.fraction(MarkPalette.widthTable(for: style), level: widthLevel) * canvasSize.width
                 guard let path = strokePath(points, canvasSize: canvasSize) else { continue }
                 ctx.saveGState()
                 ctx.addPath(path)
-                ctx.setStrokeColor(MarkPalette.color(colorIndex).cgColor)
+                ctx.setStrokeColor(MarkPalette.nsColor(color).cgColor)
                 ctx.setLineWidth(width)
                 ctx.setLineCap(.round)
                 ctx.setLineJoin(.round)
@@ -44,11 +48,13 @@ enum AnnotationRenderer {
                 switch effect {
                 case .pixelate:
                     let block = MarkPalette.fraction(MarkPalette.pixelateBlocks, level: widthLevel)
-                    effectImage = pixelateCache[block] ?? base.flatMap { pixelated($0, blockFraction: block) }
+                    effectImage = pixelateCache[block]
+                        ?? base.flatMap { pixelated($0, blockFraction: block, cache: cacheEffects) }
                     pixelateCache[block] = effectImage
                 case .blur:
                     let radius = MarkPalette.fraction(MarkPalette.blurRadii, level: widthLevel)
-                    effectImage = blurCache[radius] ?? base.flatMap { gaussianBlurred($0, radiusFraction: radius) }
+                    effectImage = blurCache[radius]
+                        ?? base.flatMap { gaussianBlurred($0, radiusFraction: radius, cache: cacheEffects) }
                     blurCache[radius] = effectImage
                 }
                 guard let effectImage else { continue }
@@ -67,10 +73,10 @@ enum AnnotationRenderer {
                 ctx.draw(effectImage, in: CGRect(origin: .zero, size: canvasSize))
                 ctx.restoreGState()
                 ctx.restoreGState()
-            case let .shape(kind, from, to, widthLevel, colorIndex):
+            case let .shape(kind, from, to, widthLevel, color):
                 drawShape(kind, from: from, to: to,
                           widthFraction: MarkPalette.fraction(MarkPalette.strokeWidths, level: widthLevel),
-                          colorIndex: colorIndex, in: ctx, canvasSize: canvasSize)
+                          color: color, in: ctx, canvasSize: canvasSize)
             }
         }
         ctx.restoreGState()
@@ -78,10 +84,10 @@ enum AnnotationRenderer {
 
     /// 形状:只描边;箭头为线段 + 实心三角头。显示坐标(y 向下)上下文。
     private static func drawShape(_ kind: ShapeKind, from: CGPoint, to: CGPoint,
-                                  widthFraction: CGFloat, colorIndex: Int,
+                                  widthFraction: CGFloat, color: MarkupColor,
                                   in ctx: CGContext, canvasSize: CGSize) {
         let width = max(1, widthFraction * canvasSize.width)
-        let color = MarkPalette.color(colorIndex).cgColor
+        let color = MarkPalette.nsColor(color).cgColor
         ctx.saveGState()
         ctx.setStrokeColor(color)
         ctx.setFillColor(color)
@@ -163,12 +169,12 @@ enum AnnotationRenderer {
     /// 在显示坐标(y 向下)上下文里画文字块。
     /// `topLeft` 是**归一化**左上角(0...1),不要传入像素坐标。
     /// 上下文必须是已被外层翻转过的;文字在局部再翻回,保证字形直立的同一份代码两端通用。
-    static func drawText(_ content: String, sizeFraction: CGFloat, colorIndex: Int,
+    static func drawText(_ content: String, sizeFraction: CGFloat, color: MarkupColor,
                          topLeft: CGPoint, in ctx: CGContext, canvasSize: CGSize) {
         let fontSize = sizeFraction * canvasSize.width
         guard fontSize > 0 else { return }
         let font = makeFont(size: fontSize)
-        let color = MarkPalette.color(colorIndex).usingColorSpace(.deviceRGB) ?? .black
+        let color = MarkPalette.nsColor(color).usingColorSpace(.deviceRGB) ?? .black
         let lineHeight = fontSize * 1.35
         let ascent = CTFontGetAscent(font)
         let x = topLeft.x * canvasSize.width
@@ -203,15 +209,19 @@ enum AnnotationRenderer {
         }
     }
 
-    private static let effectCache: NSCache<NSString, EffectCacheEntry> = {
+    /// NSCache 本身线程安全,这里显式豁免 Swift 6 的「全局可变状态」检查
+    nonisolated(unsafe) private static let effectCache: NSCache<NSString, EffectCacheEntry> = {
         let cache = NSCache<NSString, EffectCacheEntry>()
         cache.countLimit = 8
+        // 每条 = base + 效果图 ≈ 2× 位图字节数。64MB 足够覆盖预览(1500px 级),
+        // 又能保证全尺寸位图进不来——只有 countLimit 时,8 条 24MP 可驻留约 1.5GB。
+        cache.totalCostLimit = 64 * 1024 * 1024
         return cache
     }()
 
-    static func pixelated(_ base: CGImage, blockFraction: CGFloat) -> CGImage? {
+    static func pixelated(_ base: CGImage, blockFraction: CGFloat, cache: Bool = true) -> CGImage? {
         let cacheKey = "p-\(ObjectIdentifier(base))-\(blockFraction)" as NSString
-        if let entry = effectCache.object(forKey: cacheKey), entry.base === base { return entry.image }
+        if cache, let entry = effectCache.object(forKey: cacheKey), entry.base === base { return entry.image }
         let blockPx = max(1, blockFraction * CGFloat(base.width))
         let smallW = max(1, Int((CGFloat(base.width) / blockPx).rounded()))
         let smallH = max(1, Int((CGFloat(base.height) / blockPx).rounded()))
@@ -232,15 +242,18 @@ enum AnnotationRenderer {
         bigCtx.interpolationQuality = .none
         bigCtx.draw(small, in: CGRect(x: 0, y: 0, width: base.width, height: base.height))
         guard let result = bigCtx.makeImage() else { return nil }
-        effectCache.setObject(EffectCacheEntry(base: base, image: result), forKey: cacheKey)
+        if cache {
+            effectCache.setObject(EffectCacheEntry(base: base, image: result), forKey: cacheKey,
+                                  cost: base.bytesPerRow * base.height * 2)
+        }
         return result
     }
 
     private static let ciContext = CIContext(options: nil)
 
-    static func gaussianBlurred(_ base: CGImage, radiusFraction: CGFloat) -> CGImage? {
+    static func gaussianBlurred(_ base: CGImage, radiusFraction: CGFloat, cache: Bool = true) -> CGImage? {
         let cacheKey = "b-\(ObjectIdentifier(base))-\(radiusFraction)" as NSString
-        if let entry = effectCache.object(forKey: cacheKey), entry.base === base { return entry.image }
+        if cache, let entry = effectCache.object(forKey: cacheKey), entry.base === base { return entry.image }
         let input = CIImage(cgImage: base)
         // 先边缘延展再模糊,避免高斯在四边吃出透明带;最后裁回原幅
         let clamped = input.clampedToExtent()
@@ -249,7 +262,10 @@ enum AnnotationRenderer {
         filter.setValue(radiusFraction * CGFloat(base.width), forKey: kCIInputRadiusKey)
         guard let output = filter.outputImage?.cropped(to: input.extent) else { return nil }
         guard let result = ciContext.createCGImage(output, from: input.extent) else { return nil }
-        effectCache.setObject(EffectCacheEntry(base: base, image: result), forKey: cacheKey)
+        if cache {
+            effectCache.setObject(EffectCacheEntry(base: base, image: result), forKey: cacheKey,
+                                  cost: base.bytesPerRow * base.height * 2)
+        }
         return result
     }
 
