@@ -389,21 +389,19 @@ enum CropError: LocalizedError {
 /// 裁切 + 编码导出(尽量保留原 EXIF;方向已在解码时摆正,导出时重置 orientation)
 enum CropService {
 
-    /// 返回编码后的图片数据,由调用方负责保存面板与写盘。
-    /// 管线:解码 → 变换 → 烙印标记(整张变换图)→ 裁切 → 降采样 → 水印 → 编码。
+    /// 渲染管线:解码 → 变换 → 烙印标记(整张变换图)→ 裁切 → 降采样 → 水印。
+    /// 产出最终位图,**编码导出与"打印当前编辑结果"共用这一条**,保证两者像素一致。
+    /// `includeGPS` 只决定写出的元数据,与像素无关,所以不在这里。
     /// 标记坐标是变换后整图的归一化 0...1;裁掉的部分连同框外笔迹一起丢掉。
-    static func encode(sourceURL: URL,
+    static func render(sourceURL: URL,
                        normalizedRect: CGRect,
-                       format: CropFormat,
-                       quality: Double,
                        quarterTurns: Int = 0,
                        flipH: Bool = false,
                        flipV: Bool = false,
                        straightenDegrees: Double = 0,
                        maxLongestSide: Int? = nil,
-                       includeGPS: Bool = true,
                        annotations: [Annotation] = [],
-                       watermark: WatermarkSettings? = nil) throws -> Data {
+                       watermark: WatermarkSettings? = nil) throws -> CGImage {
         let full = try ImageLoader.decodeFullCGImage(url: sourceURL)
         var canvas = CropTransform.apply(
             to: full, quarterTurns: quarterTurns, flipH: flipH, flipV: flipV,
@@ -433,19 +431,37 @@ enum CropService {
         let output = CropTransform.downscaled(cropped, longestSide: maxLongestSide ?? 0)
 
         // 水印烙在最終输出像素上(裁切/缩放之后),九宫格与平铺都相对最终画幅
-        var finalOutput = output
-        if let watermark, watermark.enabled, watermark.hasContent {
-            let size = CGSize(width: output.width, height: output.height)
-            if let ctx = CGContext(
-                data: nil, width: output.width, height: output.height, bitsPerComponent: 8,
-                bytesPerRow: 0, space: output.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-            ) {
-                ctx.draw(output, in: CGRect(origin: .zero, size: size))
-                WatermarkRenderer.draw(watermark, in: ctx, canvasSize: size)
-                if let composed = ctx.makeImage() { finalOutput = composed }
-            }
-        }
+        guard let watermark, watermark.enabled, watermark.hasContent else { return output }
+        let size = CGSize(width: output.width, height: output.height)
+        guard let ctx = CGContext(
+            data: nil, width: output.width, height: output.height, bitsPerComponent: 8,
+            bytesPerRow: 0, space: output.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return output }
+        ctx.draw(output, in: CGRect(origin: .zero, size: size))
+        WatermarkRenderer.draw(watermark, in: ctx, canvasSize: size)
+        return ctx.makeImage() ?? output
+    }
+
+    /// 返回编码后的图片数据,由调用方负责保存面板与写盘。
+    static func encode(sourceURL: URL,
+                       normalizedRect: CGRect,
+                       format: CropFormat,
+                       quality: Double,
+                       quarterTurns: Int = 0,
+                       flipH: Bool = false,
+                       flipV: Bool = false,
+                       straightenDegrees: Double = 0,
+                       maxLongestSide: Int? = nil,
+                       includeGPS: Bool = true,
+                       annotations: [Annotation] = [],
+                       watermark: WatermarkSettings? = nil) throws -> Data {
+        let finalOutput = try render(
+            sourceURL: sourceURL, normalizedRect: normalizedRect,
+            quarterTurns: quarterTurns, flipH: flipH, flipV: flipV,
+            straightenDegrees: straightenDegrees, maxLongestSide: maxLongestSide,
+            annotations: annotations, watermark: watermark
+        )
 
         let data = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(

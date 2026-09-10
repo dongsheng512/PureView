@@ -1002,6 +1002,55 @@ final class CropOrientationTests: XCTestCase {
         XCTAssertGreaterThan(px.r, 200, "摆正后的下半部分应为红色,实际 \(px)")
         XCTAssertLessThan(px.b, 60, "下半部分不应出现蓝色,实际 \(px)")
     }
+
+    // MARK: B2 —— 打印与导出共用 render
+
+    /// 打印走的是 `CropService.render`,导出走 `encode`。这条锁住两者同源:
+    /// 打印出来的必须是裁切/变换之后的像素,而不是原图。
+    func testRenderAndEncodeAgreeOnPixels() throws {
+        let url = try makeRotatedJPEG()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let rect = CGRect(x: 0, y: 0, width: 1, height: 0.5)
+
+        let cg = try CropService.render(sourceURL: url, normalizedRect: rect)
+        let data = try CropService.encode(sourceURL: url, normalizedRect: rect,
+                                          format: .png, quality: 1)
+
+        let encoded = try sample(data, at: CGPoint(x: 10, y: 10))
+        XCTAssertEqual(CGSize(width: cg.width, height: cg.height), encoded.size,
+                       "render 与 encode 的尺寸必须一致")
+
+        let direct = try color(of: cg, at: CGPoint(x: 10, y: 10))
+        XCTAssertEqual([direct.r, direct.g, direct.b], [encoded.r, encoded.g, encoded.b],
+                       "同一点的像素必须一致")
+        XCTAssertGreaterThan(direct.b, 200, "摆正后的上半部分应为蓝色,实际 \(direct)")
+    }
+
+    /// render 要能不经过编码直接交出去(打印用)。
+    func testRenderReturnsCroppedPixelBuffer() throws {
+        let url = try makeRotatedJPEG()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let cg = try CropService.render(
+            sourceURL: url, normalizedRect: CGRect(x: 0, y: 0.5, width: 1, height: 0.5)
+        )
+        XCTAssertEqual(cg.width, 20)
+        XCTAssertEqual(cg.height, 20)
+        let px = try color(of: cg, at: CGPoint(x: 10, y: 10))
+        XCTAssertGreaterThan(px.r, 200, "摆正后的下半部分应为红色,实际 \(px)")
+    }
+
+    /// 从 CGImage 直接取一点颜色(上面的 `sample` 只吃 Data)。
+    private func color(of cg: CGImage, at point: CGPoint) throws -> (r: Int, g: Int, b: Int) {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let ctx = try XCTUnwrap(CGContext(
+            data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.draw(cg, in: CGRect(x: -point.x, y: -point.y,
+                                width: CGFloat(cg.width), height: CGFloat(cg.height)))
+        return (Int(pixel[0]), Int(pixel[1]), Int(pixel[2]))
+    }
 }
 
 private extension Int {

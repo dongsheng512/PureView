@@ -99,6 +99,9 @@ struct EditView: View {
 
     // 导出
     @State private var exporting = false
+    /// 打印前要把编辑结果渲染成位图,和导出一样是重活。此标志用于在渲染期间禁用按钮,
+    /// 防止连点弹出两个打印面板。
+    @State private var printPreparing = false
     @State private var errorMessage: String?
     @State private var format: CropFormat = .png
     // 质量与 GPS 开关跨会话记忆。格式**不记**:`CropFormat.default(forSourceExt:)` 按源扩展名
@@ -296,6 +299,10 @@ struct EditView: View {
                     }
                     .disabled(exporting || previewFailed)
                 }
+                Divider()
+                // 打印当前编辑结果。与 ⌘P 分开:⌘P 印的是磁盘原图,这里印的是裁切/水印/标注之后的。
+                Button("打印…") { printEdited() }
+                    .disabled(exporting || printPreparing || previewFailed)
             } label: {
                 Text("导出")
                     .font(.system(size: 12, weight: .medium))
@@ -1802,6 +1809,43 @@ struct EditView: View {
                 errorMessage = error.localizedDescription
             case .success(let data):
                 await MainActor.run { save(data: data, overwrite: overwrite, format: outFormat, dest: destURL) }
+            }
+        }
+    }
+
+    /// 打印「当前编辑结果」。
+    ///
+    /// 与 ⌘P 的区别:⌘P 走的是 `PrintService.print(image:)` + 磁盘原图,不经过编辑器;
+    /// 这里先把当前编辑态(变换 → 烙印标注 → 裁切 → 水印)渲染成位图再交给同一个打印服务,
+    /// 因此打印出来的和导出所见一致。管线与导出**完全共用** `CropService.render`,
+    /// 只打印不落盘,所以不需要选格式/质量/路径。
+    private func printEdited() {
+        guard !exporting, !printPreparing, displayPreview != nil, !previewFailed else { return }
+        if draftAnchor != nil { commitDraft() }
+
+        printPreparing = true
+        let url = file.url
+        let anns = annotations
+        let turns = quarterTurns, fh = flipH, fv = flipV, deg = straighten
+        let rect = selection
+        let mark = watermarkDraft
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<CGImage, Error> in
+                Result {
+                    try CropService.render(
+                        sourceURL: url, normalizedRect: rect,
+                        quarterTurns: turns, flipH: fh, flipV: fv, straightenDegrees: deg,
+                        maxLongestSide: nil,
+                        annotations: anns, watermark: mark
+                    )
+                }
+            }.value
+            printPreparing = false
+            switch result {
+            case .failure(let error):
+                errorMessage = error.localizedDescription
+            case .success(let cg):
+                PrintService.print(image: NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)))
             }
         }
     }
