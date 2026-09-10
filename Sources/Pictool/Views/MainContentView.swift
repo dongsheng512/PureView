@@ -8,6 +8,11 @@ struct MainContentView: View {
 
     @Environment(FolderStore.self) private var store
     @State private var isPreparingPrint = false
+    // 拼版打印:选项弹层 + 解码期间的门禁(与 isPreparingPrint 分开,
+    // 因为它还要在弹层里禁按钮)
+    @State private var showContactSheetOptions = false
+    @State private var contactSheetOptions = ContactSheetOptions()
+    @State private var contactSheetPreparing = false
     @State private var showZoomMenu = false
     @State private var isDropTargeted = false
     @State private var sidebarWidth: CGFloat = UserDefaults.standard.double(forKey: "sidebarWidth") > 0 ? UserDefaults.standard.double(forKey: "sidebarWidth") : 260
@@ -48,6 +53,7 @@ struct MainContentView: View {
             store.wrapNavigation = wrapNavigation
             store.slideshowInterval = slideshowInterval
             store.applySortPreference(sortPreference)
+            contactSheetOptions = ContactSheetOptions.loadFromDefaults()
         }
         .onChange(of: slideshowInterval) { _, value in
             store.slideshowInterval = value
@@ -72,6 +78,12 @@ struct MainContentView: View {
         }
         .onChange(of: sortDirection) { _, _ in
             store.applySortPreference(sortPreference)
+        }
+        .onChange(of: store.contactSheetRequestToken) { _, _ in
+            presentContactSheetOptions()
+        }
+        .sheet(isPresented: $showContactSheetOptions) {
+            contactSheetSheet
         }
         .onOpenURL { url in handleExternal(url) }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
@@ -257,6 +269,65 @@ struct MainContentView: View {
         .ignoresSafeArea(edges: .top)
         .onDisappear {
             WindowMoveControl.setBackgroundMove(true)
+        }
+    }
+
+    // MARK: - 拼版打印
+
+    /// 当前图起还剩几张可选,作为「张数」上限。
+    private var contactSheetAvailableCount: Int {
+        max(1, min(store.imagesFromCurrent.count, ContactSheetOptions.countRange.upperBound))
+    }
+
+    private var contactSheetSheet: some View {
+        let clamped = contactSheetOptions.clamped(availableCount: contactSheetAvailableCount)
+        let metrics = PrintService.contactSheetMetrics(options: clamped, imageCount: clamped.count)
+        return ContactSheetOptionsForm(
+            options: $contactSheetOptions,
+            availableCount: contactSheetAvailableCount,
+            metrics: metrics,
+            preparing: contactSheetPreparing,
+            onCancel: { showContactSheetOptions = false },
+            onPrint: {
+                let chosen = contactSheetOptions.clamped(availableCount: contactSheetAvailableCount)
+                contactSheetOptions = chosen
+                chosen.saveToDefaults()
+                showContactSheetOptions = false
+                prepareAndPrintContactSheet(options: chosen)
+            }
+        )
+    }
+
+    private func presentContactSheetOptions() {
+        guard store.currentImage != nil, !contactSheetPreparing else { return }
+        contactSheetOptions = contactSheetOptions
+            .clamped(availableCount: contactSheetAvailableCount)
+        showContactSheetOptions = true
+    }
+
+    private func prepareAndPrintContactSheet(options: ContactSheetOptions) {
+        guard !contactSheetPreparing else { return }
+        let picked = Array(store.imagesFromCurrent.prefix(options.count))
+        guard !picked.isEmpty else { return }
+        let sources = picked.map { ContactSheetImageLoader.Source(url: $0.url, title: $0.name) }
+
+        contactSheetPreparing = true
+        store.isModalPresented = true
+        // 缩略图必须按格子的实际像素尺寸下单(几百 px),绝不能解全尺寸——
+        // 20 张 24MP 拼版会瞬间吃掉几百 MB。
+        let maxPixel = PrintService.contactSheetMetrics(options: options,
+                                                        imageCount: sources.count).thumbnailMaxPixel
+        Task {
+            let loaded = await ContactSheetImageLoader.load(sources, maxPixel: maxPixel)
+            // 解不出来的图直接略过,不占格子,免得版面上出现空框。
+            let items = loaded.compactMap { $0 }
+            contactSheetPreparing = false
+            store.isModalPresented = false
+            guard !items.isEmpty else { return }
+            await MainActor.run {
+                PrintService.print(contactSheet: items, options: options)
+                store.isModalPresented = false
+            }
         }
     }
 

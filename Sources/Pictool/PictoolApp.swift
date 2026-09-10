@@ -107,6 +107,10 @@ struct PictoolApp: App {
                 Button("打印…") { store.requestPrint() }
                     .keyboardShortcut("p", modifiers: .command)
                     .disabled(store.currentImage == nil || store.isModalPresented)
+                Button("拼版打印…") { store.requestContactSheet() }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .disabled(store.currentImage == nil || store.isModalPresented
+                              || store.images.count < 2)
             }
             CommandMenu("图片") {
                 // 裸键与方向键在模态面板打开时一律失效,否则会在面板背后改动浏览状态

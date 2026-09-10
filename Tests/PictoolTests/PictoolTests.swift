@@ -2158,3 +2158,242 @@ final class ExportQualityTests: XCTestCase {
         XCTAssertTrue(ExportGPS.defaultValue)
     }
 }
+
+/// B3 拼版打印:版式是纯几何,格网/内接/分页/纸张摆正全部在这里锁住。
+final class ContactSheetLayoutTests: XCTestCase {
+
+    private func options(count: Int = 20,
+                         columns: Int = 4,
+                         rows: Int = 5,
+                         filenames: Bool = true) -> ContactSheetOptions {
+        var out = ContactSheetOptions()
+        out.count = count
+        out.columns = columns
+        out.rows = rows
+        out.showFilenames = filenames
+        return out
+    }
+
+    private let a4Portrait = CGSize(width: 595, height: 842)
+
+    // MARK: 格网
+
+    /// 内边距与格间距都留在纸内:最外一行/一列的边缘必须正好落在 inset 上。
+    func testGridFillsPageExactly() {
+        let grid = ContactSheetLayout.grid(pageSize: a4Portrait, rows: 5, columns: 4,
+                                           inset: 22, spacing: 10)
+        XCTAssertEqual(grid.frames.count, 20)
+        XCTAssertEqual(grid.cellSize.width, (595 - 44 - 30) / 4, accuracy: 1e-9)
+        XCTAssertEqual(grid.cellSize.height, (842 - 44 - 40) / 5, accuracy: 1e-9)
+
+        XCTAssertEqual(grid.frames[0].minX, 22, accuracy: 1e-9)
+        XCTAssertEqual(grid.frames[0].minY, 22, accuracy: 1e-9)
+        XCTAssertEqual(grid.frames[19].maxX, 595 - 22, accuracy: 1e-9)
+        XCTAssertEqual(grid.frames[19].maxY, 842 - 22, accuracy: 1e-9)
+    }
+
+    /// frames 必须是阅读顺序(先右后下),否则第 N 张会跑到别处去。
+    func testGridOrderIsReadingOrder() {
+        let grid = ContactSheetLayout.grid(pageSize: a4Portrait, rows: 5, columns: 4,
+                                           inset: 22, spacing: 10)
+        XCTAssertGreaterThan(grid.frames[1].minX, grid.frames[0].minX)
+        XCTAssertEqual(grid.frames[1].minY, grid.frames[0].minY, accuracy: 1e-9)
+        // 第 5 个是第二行第一个:横坐标回到最左,纵坐标下移一行
+        XCTAssertEqual(grid.frames[4].minX, grid.frames[0].minX, accuracy: 1e-9)
+        XCTAssertGreaterThan(grid.frames[4].minY, grid.frames[3].maxY)
+    }
+
+    /// 纸太小装不下这么多格时给全零,而不是负尺寸的矩形(负宽高会画出鬼影)。
+    func testGridDegradesToZeroCellInsteadOfNegative() {
+        let grid = ContactSheetLayout.grid(pageSize: CGSize(width: 100, height: 100),
+                                           rows: 10, columns: 10,
+                                           inset: 22, spacing: 10)
+        XCTAssertEqual(grid.cellSize, .zero)
+        XCTAssertEqual(grid.frames.count, 100)
+        XCTAssertTrue(grid.frames.allSatisfy { $0 == .zero })
+    }
+
+    func testGridClampsDegenerateRowAndColumnCounts() {
+        let grid = ContactSheetLayout.grid(pageSize: a4Portrait, rows: 0, columns: 0,
+                                           inset: 0, spacing: 0)
+        XCTAssertEqual(grid.rows, 1)
+        XCTAssertEqual(grid.columns, 1)
+        XCTAssertEqual(grid.frames.count, 1)
+        XCTAssertEqual(grid.cellSize.width, 595, accuracy: 1e-9)
+        XCTAssertEqual(grid.cellSize.height, 842, accuracy: 1e-9)
+    }
+
+    // MARK: 格内摆放
+
+    /// 横图内接方格子:贴住左右,上下留白。
+    func testFittedRectPreservesAspectAndCenters() {
+        let cell = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let landscape = ContactSheetLayout.fittedRect(aspect: CGSize(width: 400, height: 300), in: cell)
+        XCTAssertEqual(landscape.width, 100, accuracy: 1e-9)
+        XCTAssertEqual(landscape.height, 75, accuracy: 1e-9)
+        XCTAssertEqual(landscape.minY, 12.5, accuracy: 1e-9)
+
+        let portrait = ContactSheetLayout.fittedRect(aspect: CGSize(width: 300, height: 400), in: cell)
+        XCTAssertEqual(portrait.width, 75, accuracy: 1e-9)
+        XCTAssertEqual(portrait.height, 100, accuracy: 1e-9)
+        XCTAssertEqual(portrait.minX, 12.5, accuracy: 1e-9)
+    }
+
+    func testFittedRectKeepsCellOffset() {
+        let cell = CGRect(x: 200, y: 300, width: 100, height: 100)
+        let fitted = ContactSheetLayout.fittedRect(aspect: CGSize(width: 400, height: 300), in: cell)
+        XCTAssertEqual(fitted.midX, cell.midX, accuracy: 1e-9)
+        XCTAssertEqual(fitted.midY, cell.midY, accuracy: 1e-9)
+    }
+
+    /// 退化输入不返回 NaN / 负矩形 —— 这类值一旦进 CGContext 会静默画歪整页。
+    func testFittedRectFallsBackToCellForDegenerateInput() {
+        let cell = CGRect(x: 1, y: 2, width: 3, height: 4)
+        XCTAssertEqual(ContactSheetLayout.fittedRect(aspect: .zero, in: cell), cell)
+        XCTAssertEqual(ContactSheetLayout.fittedRect(aspect: CGSize(width: 4, height: 3), in: .zero), .zero)
+    }
+
+    // MARK: 格内分区
+
+    func testImageAndTitleRectsSplitTheCell() {
+        let cell = CGRect(x: 10, y: 20, width: 100, height: 140)
+        let image = ContactSheetLayout.imageRect(in: cell, titleHeight: 13)
+        XCTAssertEqual(image, CGRect(x: 10, y: 20, width: 100, height: 127))
+
+        // 视图是 flipped,标题条贴在格子底边(cell.maxY)
+        let title = ContactSheetLayout.titleRect(in: cell, titleHeight: 13)
+        XCTAssertEqual(title, CGRect(x: 10, y: 147, width: 100, height: 13))
+    }
+
+    /// 不标文件名时整格都归图,标题矩形为 .null(调用方 isEmpty 即可跳过)。
+    func testNoTitleHeightGivesWholeCellToImage() {
+        let cell = CGRect(x: 10, y: 20, width: 100, height: 140)
+        XCTAssertEqual(ContactSheetLayout.imageRect(in: cell, titleHeight: 0), cell)
+        XCTAssertTrue(ContactSheetLayout.titleRect(in: cell, titleHeight: 0).isEmpty)
+    }
+
+    // MARK: 分页
+
+    func testPageCountAndImagesPerPage() {
+        XCTAssertEqual(ContactSheetLayout.imagesPerPage(imageCount: 20, rows: 5, columns: 4), [20])
+        XCTAssertEqual(ContactSheetLayout.pageCount(imageCount: 20, rows: 5, columns: 4), 1)
+
+        XCTAssertEqual(ContactSheetLayout.imagesPerPage(imageCount: 50, rows: 6, columns: 8), [48, 2])
+        XCTAssertEqual(ContactSheetLayout.pageCount(imageCount: 50, rows: 6, columns: 8), 2)
+
+        // 正好整除时不留空页
+        XCTAssertEqual(ContactSheetLayout.imagesPerPage(imageCount: 48, rows: 6, columns: 8), [48])
+        XCTAssertEqual(ContactSheetLayout.pageCount(imageCount: 48, rows: 6, columns: 8), 1)
+    }
+
+    /// 空集必须报 1 页:NSPrintOperation 的页数范围不接受 0。
+    func testEmptySheetStillReportsOnePage() {
+        XCTAssertEqual(ContactSheetLayout.imagesPerPage(imageCount: 0, rows: 4, columns: 5), [0])
+        XCTAssertEqual(ContactSheetLayout.pageCount(imageCount: 0, rows: 4, columns: 5), 1)
+    }
+
+    // MARK: 版式指标
+
+    func testMetricsPicksLandscapePaperForWideGrid() {
+        let wide = ContactSheetLayout.metrics(paperSize: a4Portrait,
+                                              options: options(columns: 6, rows: 4),
+                                              imageCount: 24)
+        XCTAssertTrue(wide.isLandscape)
+        XCTAssertEqual(wide.pageSize, CGSize(width: 842, height: 595))
+
+        let tall = ContactSheetLayout.metrics(paperSize: a4Portrait,
+                                              options: options(columns: 4, rows: 5),
+                                              imageCount: 20)
+        XCTAssertFalse(tall.isLandscape)
+        XCTAssertEqual(tall.pageSize, a4Portrait)
+    }
+
+    /// 行列数相等时按纵向纸(不是横向)—— `columns > rows` 才换向。
+    func testSquareGridKeepsPortraitPaper() {
+        let square = ContactSheetLayout.metrics(paperSize: a4Portrait,
+                                                options: options(columns: 4, rows: 4),
+                                                imageCount: 16)
+        XCTAssertFalse(square.isLandscape)
+        XCTAssertEqual(square.pageSize, a4Portrait)
+    }
+
+    func testMetricsTitleHeightFollowsShowFilenames() {
+        let withTitle = ContactSheetLayout.metrics(paperSize: a4Portrait,
+                                                   options: options(filenames: true),
+                                                   imageCount: 20)
+        XCTAssertEqual(withTitle.titleHeight, ContactSheetLayout.titleHeight)
+
+        let without = ContactSheetLayout.metrics(paperSize: a4Portrait,
+                                                 options: options(filenames: false),
+                                                 imageCount: 20)
+        XCTAssertEqual(without.titleHeight, 0)
+    }
+
+    /// 缩略图请求像素跟着格子走:300dpi 下 151.6pt 的格子 ≈ 632px。
+    func testMetricsThumbnailPixelMatchesCellAt300DPI() {
+        let metrics = ContactSheetLayout.metrics(paperSize: a4Portrait,
+                                                 options: options(columns: 4, rows: 5),
+                                                 imageCount: 20)
+        XCTAssertEqual(metrics.thumbnailMaxPixel, 632, accuracy: 1)
+
+        // 格网越密,单格越小,请求的像素也越小 —— 这是拼版不吃内存的关键
+        let dense = ContactSheetLayout.metrics(paperSize: a4Portrait,
+                                               options: options(columns: 10, rows: 10),
+                                               imageCount: 100)
+        XCTAssertLessThan(dense.thumbnailMaxPixel, metrics.thumbnailMaxPixel)
+    }
+
+    /// 格子过小/过大都要被夹住,否则小格发糊或大格一口气吃掉几百 MB。
+    func testMetricsThumbnailPixelIsClamped() {
+        let tiny = ContactSheetLayout.metrics(paperSize: CGSize(width: 200, height: 200),
+                                              options: options(columns: 10, rows: 10),
+                                              imageCount: 100)
+        XCTAssertEqual(tiny.thumbnailMaxPixel, ContactSheetLayout.thumbnailPixelRange.lowerBound)
+
+        let huge = ContactSheetLayout.metrics(paperSize: CGSize(width: 842, height: 1191),
+                                              options: options(count: 1, columns: 1, rows: 1),
+                                              imageCount: 1)
+        XCTAssertEqual(huge.thumbnailMaxPixel, ContactSheetLayout.thumbnailPixelRange.upperBound)
+    }
+
+    func testMetricsPerPageAndPageCount() {
+        let metrics = ContactSheetLayout.metrics(paperSize: a4Portrait,
+                                                 options: options(count: 50, columns: 8, rows: 6),
+                                                 imageCount: 50)
+        XCTAssertEqual(metrics.perPage, 48)
+        XCTAssertEqual(metrics.pageCount, 2)
+    }
+
+    // MARK: 选项夹取与记忆
+
+    func testOptionsClampToAvailableImagesAndRanges() {
+        var raw = options(count: 500, columns: 0, rows: 99)
+        let clamped = raw.clamped(availableCount: 7)
+        XCTAssertEqual(clamped.count, 7)
+        XCTAssertEqual(clamped.columns, ContactSheetOptions.columnsRange.lowerBound)
+        XCTAssertEqual(clamped.rows, ContactSheetOptions.rowsRange.upperBound)
+
+        // 一张可用的都没有时至少留 1,避免算出零格版式
+        raw = options(count: 0, columns: 3, rows: 3)
+        XCTAssertEqual(raw.clamped(availableCount: 0).count, 1)
+    }
+
+    func testOptionsRoundTripThroughDefaults() {
+        let name = "pictool.contactSheet.tests"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+
+        var saved = ContactSheetOptions()
+        saved.count = 12
+        saved.columns = 3
+        saved.rows = 5
+        saved.showFilenames = false
+        saved.saveToDefaults(defaults)
+
+        let loaded = ContactSheetOptions.loadFromDefaults(defaults)
+        XCTAssertEqual(loaded.count, 12)
+        XCTAssertEqual(loaded.columns, 3)
+        XCTAssertEqual(loaded.rows, 5)
+        XCTAssertFalse(loaded.showFilenames)
+    }
+}

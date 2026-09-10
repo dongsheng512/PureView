@@ -169,6 +169,7 @@ final class FolderStore {
         sidebarVisible = true
     }
     private(set) var printRequestToken = 0
+    private(set) var contactSheetRequestToken = 0
     private(set) var cropRequestToken = 0
     private(set) var markupRequestToken = 0
     private(set) var editRequestToken = 0
@@ -774,6 +775,19 @@ final class FolderStore {
     func requestPrint() {
         guard currentImage != nil else { return }
         printRequestToken += 1
+    }
+
+    /// 打开「拼版打印」选项弹层。
+    func requestContactSheet() {
+        guard currentImage != nil else { return }
+        contactSheetRequestToken += 1
+    }
+
+    /// 拼版打印的候选集:当前图起、按浏览顺序连续排列。
+    /// 没有选中项时退化为整个文件夹(与 `currentIndex < 0` 的语义一致)。
+    var imagesFromCurrent: [ImageFile] {
+        guard selectedImageID != nil, !images.isEmpty, currentIndex >= 0 else { return images }
+        return Array(images[currentIndex...])
     }
 
     func requestCrop() {
