@@ -57,8 +57,14 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
             }
-            Section("水印(标记导出时生效)") {
+            // R5:原标题「水印(标记导出时生效)」把语义说窄了 —— 这份设置同时也是编辑、
+            // 拼版打印用的水印,而且在编辑态改动会回写保存。标题改为「默认」,关系写进脚注。
+            Section {
                 WatermarkSettingsForm(settings: $watermark)
+            } header: {
+                Text("水印(编辑导出时的默认)")
+            } footer: {
+                Text("进入编辑后,也可在顶栏的水印按钮里直接调整 —— 改动同样会保存为默认。")
             }
         }
         .formStyle(.grouped)

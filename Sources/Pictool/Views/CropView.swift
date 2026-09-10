@@ -26,6 +26,11 @@ struct CropCanvas: View {
     let onInteractionStart: () -> Void
     var overlay: NSImage? = nil
     var watermark: WatermarkSettings = WatermarkSettings()
+    /// 当前选区的**输出像素尺寸**(宽 × 高)。贴在选框角上实时显示 —— 这本质是「画布上的
+    /// 信息」,原先挤在工具弹层底部,离它描述的对象太远。
+    var outputSize: CGSize = .zero
+    /// 右键菜单(容器坐标进出);nil 表示无
+    var contextMenuProvider: ((CGPoint) -> NSMenu?)?
 
     @State private var dragBaseline: CGRect?
     @State private var dragStartPoint: CGPoint?
@@ -81,12 +86,28 @@ struct CropCanvas: View {
                         .allowsHitTesting(false)
                 }
 
+                // 输出尺寸读数:贴选框右下角**内缘**。放内部是因为选框可能被拖到图片任意位置,
+                // 贴外面会跑出画布;选框太小就藏起来,免得盖住内容。
+                if outputSize.width >= 1, shown.width > 40, shown.height > 24 {
+                    Text("\(Int(outputSize.width.rounded())) × \(Int(outputSize.height.rounded()))")
+                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.black.opacity(0.62)))
+                        .padding(4)
+                        .frame(width: shown.width, height: shown.height, alignment: .bottomTrailing)
+                        .offset(x: shown.minX, y: shown.minY)
+                        .allowsHitTesting(false)
+                }
+
                 // 显式给尺寸:NSViewRepresentable 没有 intrinsicContentSize,
                 // 不钉住就只有被命中的那一小块能拖,其余区域照样漏给窗口。
                 CanvasMouseCatcher(
                     onDown: { point in handleDown(point, fit: fit, minNorm: minNorm) },
                     onDrag: { point in handleDrag(point, fit: fit, minNorm: minNorm) },
-                    onUp: handleUp
+                    onUp: handleUp,
+                    contextMenuProvider: contextMenuProvider
                 )
                 .frame(width: geo.size.width, height: geo.size.height)
             }

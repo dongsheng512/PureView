@@ -110,7 +110,9 @@ struct EditView: View {
     @AppStorage(ExportGPS.storageKey) private var includeGPS = ExportGPS.defaultValue
     @State private var watermarkDraft = WatermarkSettings()
     @State private var showWatermarkSettings = false
-    @State private var showToolPopover = false
+    /// 工具属性面板是否展开。**不是系统 .popover**:那玩意是 transient 语义,在画布上
+    /// 每按一次鼠标就关一次,而裁切的自然流程恰恰是「调参数 ↔ 拖选框」来回切。
+    @State private var showToolPanel = false
     @State private var showColorPopover = false
     @State private var colorPanelListening = false
     @State private var showExportPopover = false
@@ -128,6 +130,25 @@ struct EditView: View {
         .environment(\.colorScheme, ChromeTheme.colorScheme(for: canvasBackground))
         .background(ChromeTheme.fill(canvasBackground))
         .background(WindowBackgroundMoveLock(allowMove: false))
+        // 工具属性面板。挂在**最外层** VStack 的 overlay 上,而不是各按钮自己的 overlay:
+        //   1) 面板要伸到画布上方,而 SwiftUI 的命中测试受祖先 bounds 约束 —— 挂在顶栏上
+        //      就只在顶栏那 32pt 内点得到,面板会「看得见、点不着」;
+        //   2) 作为最外层容器的子视图,它天然画在 canvasArea 的 `.clipped()` 之外、
+        //      也在 CanvasMouseCatcher 之上(与 MarkupCanvas 里草稿输入框同一套路数)。
+        .overlayPreferenceValue(ToolAnchorKey.self) { anchor in
+            GeometryReader { proxy in
+                if let anchor, showToolPanel, let width = toolPanelWidth {
+                    let button = proxy[anchor]
+                    toolPanelContent(tool)
+                        .frame(width: width)
+                        .background(ToolPanelBackground())
+                        .fixedSize(horizontal: false, vertical: true)
+                        .offset(x: panelOriginX(button: button, width: width,
+                                                container: proxy.size.width),
+                                y: button.maxY + 6)
+                }
+            }
+        }
         .onAppear {
             tool = initialTool
             quarterTurns = ((initialQuarterTurns % 4) + 4) % 4
@@ -266,7 +287,12 @@ struct EditView: View {
             Spacer()
 
             // 水印独立入口:纯图标(无边框箭头),高度与颜色/大小 chip 一致;导出弹层里另有勾选项
-            Button { showWatermarkSettings.toggle() } label: {
+            Button {
+                // 面板是常驻的,开系统 popover 前先收掉,免得两块浮层叠在一起
+                showToolPanel = false
+                showColorPopover = false
+                showWatermarkSettings.toggle()
+            } label: {
                 Image(systemName: watermarkDraft.enabled && watermarkDraft.hasContent
                         ? "checkmark.seal.fill" : "seal")
                     .font(.system(size: 12))
@@ -359,6 +385,7 @@ struct EditView: View {
 
     private func toolbarToolButton(_ t: EditTool) -> some View {
         let hasMenu = t != .eraser
+        let panelOpen = hasMenu && tool == t && showToolPanel
         return Button {
             selectToolbarTool(t)
         } label: {
@@ -369,6 +396,8 @@ struct EditView: View {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 6, weight: .bold))
                         .foregroundStyle(.secondary)
+                        // 展开时箭头翻转 —— 面板常驻之后,这是「这块面板属于这个按钮」的主要提示
+                        .rotationEffect(.degrees(panelOpen ? 180 : 0))
                 }
             }
             .frame(width: hasMenu ? 34 : 26, height: 22)
@@ -382,30 +411,25 @@ struct EditView: View {
         }
         .buttonStyle(.plain)
         .help(t == .shape ? shapeKind.label : t.label)
-        .popover(isPresented: toolPopoverBinding(t), arrowEdge: .bottom) {
-            toolPopoverContent(t)
+        // 只上报「当前工具」那一个按钮的 bounds:一次只开一块面板,用不着字典。
+        // 其余按钮返回 nil,reduce 里被忽略。
+        .anchorPreference(key: ToolAnchorKey.self, value: .bounds) { anchor in
+            tool == t ? anchor : nil
         }
-    }
-
-    private func toolPopoverBinding(_ t: EditTool) -> Binding<Bool> {
-        Binding(
-            get: { showToolPopover && tool == t },
-            set: { showToolPopover = $0 }
-        )
     }
 
     private func selectToolbarTool(_ t: EditTool) {
         showColorPopover = false
         if t == .eraser {
-            showToolPopover = false
+            showToolPanel = false
             switchTool(t)
             return
         }
         if tool == t {
-            showToolPopover.toggle()
+            showToolPanel.toggle()
         } else {
             switchTool(t)
-            showToolPopover = true
+            showToolPanel = true
         }
     }
 
@@ -415,7 +439,7 @@ struct EditView: View {
 
     private var colorToolbarButton: some View {
         Button {
-            showToolPopover = false
+            showToolPanel = false
             showColorPopover.toggle()
         } label: {
             HStack(spacing: 2) {
@@ -488,8 +512,23 @@ struct EditView: View {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    /// 面板宽度。内容自身不再设 frame —— 宽度只在这一处定义,免得定位用的宽度与绘制宽度对不上。
+    private var toolPanelWidth: CGFloat? {
+        switch tool {
+        case .crop: 260
+        case .text, .brush, .mosaic, .shape: 176
+        case .eraser: nil
+        }
+    }
+
+    /// 面板水平位置:与按钮中心对齐,再夹进容器内(靠边的工具按钮不让面板出界)
+    private func panelOriginX(button: CGRect, width: CGFloat, container: CGFloat) -> CGFloat {
+        let ideal = button.midX - width / 2
+        return min(max(8, ideal), max(8, container - width - 8))
+    }
+
     @ViewBuilder
-    private func toolPopoverContent(_ t: EditTool) -> some View {
+    private func toolPanelContent(_ t: EditTool) -> some View {
         switch t {
         case .crop:
             cropMenu
@@ -498,7 +537,6 @@ struct EditView: View {
                 levelPicker(title: "字号")
             }
             .padding(10)
-            .frame(width: 168)
         case .brush:
             VStack(alignment: .leading, spacing: 10) {
                 optionRow(title: "样式", labels: StrokeStyleKind.allCases.map(\.label),
@@ -508,7 +546,6 @@ struct EditView: View {
                 levelPicker(title: "粗细")
             }
             .padding(10)
-            .frame(width: 168)
         case .mosaic:
             VStack(alignment: .leading, spacing: 10) {
                 optionRow(title: "效果", labels: MosaicEffect.allCases.map(\.label),
@@ -518,14 +555,17 @@ struct EditView: View {
                 levelPicker(title: "强度")
             }
             .padding(10)
-            .frame(width: 168)
         case .shape:
+            // D3(借鉴预览):「选哪个形状」和「长什么样(粗细)」在视觉上分层。
+            // 原来只有 4 个无标注的图标顶着「粗细」,两组信息糊在一起。
             VStack(alignment: .leading, spacing: 10) {
-                shapePickerGrid
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("形状").font(.caption).foregroundStyle(.secondary)
+                    shapePickerGrid
+                }
                 levelPicker(title: "粗细")
             }
             .padding(10)
-            .frame(width: 196)
         case .eraser:
             EmptyView()
         }
@@ -584,7 +624,8 @@ struct EditView: View {
     }
 
     private var shapePickerGrid: some View {
-        HStack(spacing: 2) {
+        // 4 × 36 + 3 × 4 = 156,正好是面板内宽(176 − 2×10),不再靠 maxWidth 撑开
+        HStack(spacing: 4) {
             ForEach(ShapeKind.pickerOrder) { kind in
                 Button {
                     shapeKind = kind
@@ -604,12 +645,82 @@ struct EditView: View {
                 .help(kind.label)
             }
         }
-        .frame(maxWidth: .infinity)
     }
 
+    /// 裁切面板。顺序按使用频率排:**比例 → 拉直**,调完就在画布上拖选框。
+    /// 「尺寸读数」与「全选 / 重置」不在这里:前者本质是画布上的信息(贴选框角实时显示),
+    /// 后者是画布动作(右键菜单)。两者原本**全仓库只有这一个入口**,是搬家不是删除。
     private var cropMenu: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        VStack(alignment: .leading, spacing: 12) {
+            ratioSection
+            if ratio == .custom { customRatioFields }
+            straightenSection
+        }
+        .padding(10)
+    }
+
+    /// 比例:一行 chip,一次点击即选中(原来是 `Picker`,要先展开再选,两次点击)
+    private var ratioSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text("比例").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button { swapRatio() } label: {
+                    Image(systemName: "arrow.left.arrow.right").font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .disabled(!ratio.supportsSwap)
+                .help("交换比例方向")
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 5),
+                      spacing: 4) {
+                ForEach(CropRatio.allCases) { r in
+                    Button { pickRatio(r) } label: {
+                        Text(r.rawValue)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                            .background {
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(Color.primary.opacity(ratio == r ? 0.16 : 0.05))
+                            }
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func pickRatio(_ r: CropRatio) {
+        guard ratio != r else { return }
+        ratio = r
+        if r != .free { snapToRatio() }
+    }
+
+    private var customRatioFields: some View {
+        HStack(spacing: 4) {
+            TextField("宽", text: $customW)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 44)
+                .multilineTextAlignment(.center)
+                .focused($editingCustomRatio)
+                .onSubmit { snapToRatio() }
+            Text(":").foregroundStyle(.secondary)
+            TextField("高", text: $customH)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 44)
+                .multilineTextAlignment(.center)
+                .focused($editingCustomRatio)
+                .onSubmit { snapToRatio() }
+            Spacer()
+        }
+    }
+
+    private var straightenSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
                 Text("拉直").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Text("\(straighten, specifier: "%.0f")°")
@@ -623,64 +734,11 @@ struct EditView: View {
             Slider(value: $straighten, in: -45...45)
                 .disabled(previewFailed)
                 .onChange(of: straighten) { _, _ in scheduleStraightenPreview() }
-
-            HStack(spacing: 6) {
-                Text("比例").font(.caption).foregroundStyle(.secondary)
-                Picker("比例", selection: $ratio) {
-                    ForEach(CropRatio.allCases) { r in
-                        Text(r.rawValue).tag(r)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .onChange(of: ratio) { _, newRatio in
-                    if newRatio != .free { snapToRatio() }
-                }
-                Button { swapRatio() } label: {
-                    Image(systemName: "arrow.left.arrow.right")
-                }
-                .buttonStyle(.plain)
-                .disabled(!ratio.supportsSwap)
-                .help("交换比例方向")
-            }
-            if ratio == .custom {
-                HStack(spacing: 4) {
-                    TextField("宽", text: $customW)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 40)
-                        .multilineTextAlignment(.center)
-                        .focused($editingCustomRatio)
-                        .onSubmit { snapToRatio() }
-                    Text(":").foregroundStyle(.secondary)
-                    TextField("高", text: $customH)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 40)
-                        .multilineTextAlignment(.center)
-                        .focused($editingCustomRatio)
-                        .onSubmit { snapToRatio() }
-                }
-            }
-            HStack {
-                if transformedPixelSize.width > 0 {
-                    Text("\(Int(pixelRect.width.rounded())) × \(Int(pixelRect.height.rounded()))")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("全选") { mutateSelection(CGRect(x: 0, y: 0, width: 1, height: 1)) }
-                    .font(.caption)
-                    .buttonStyle(.plain)
-                Button("重置") { mutateSelection(CGRect(x: 0.08, y: 0.08, width: 0.84, height: 0.84)) }
-                    .font(.caption)
-                    .buttonStyle(.plain)
-            }
         }
-        .padding(10)
-        .frame(width: 220)
     }
 
     private func closeStyleMenus() {
-        showToolPopover = false
+        showToolPanel = false
         showColorPopover = false
         showExportPopover = false
     }
@@ -698,7 +756,10 @@ struct EditView: View {
                             previewAspect: displayPreview.size.width / max(1, displayPreview.size.height),
                             onInteractionStart: beginUndoGroup,
                             overlay: overlayImage,
-                            watermark: liveWatermark
+                            watermark: liveWatermark,
+                            // 尺寸读数搬到画布:它本质是「画布上的信息」,贴在选框角实时看得见
+                            outputSize: transformedPixelSize.width > 0 ? pixelRect.size : .zero,
+                            contextMenuProvider: { _ in cropContextMenu() }
                         )
                     }
                 } else {
@@ -987,8 +1048,13 @@ struct EditView: View {
         selectedID = annotations.last?.id
     }
 
+    /// Esc 的优先级:**先收面板 → 再退草稿 → 再取消选中 → 最后才退出编辑**。
+    /// 面板是常驻的,不加这一档就会「面板开着、一按 Esc 直接退出编辑」。
     private func handleEscape() {
-        if draftAnchor != nil {
+        if showToolPanel || showColorPopover {
+            showToolPanel = false
+            showColorPopover = false
+        } else if draftAnchor != nil {
             cancelDraft()
         } else if selectedID != nil {
             selectNone()
@@ -1021,6 +1087,22 @@ struct EditView: View {
         )
         item.target = box
         return item
+    }
+
+    /// 裁切画布的右键菜单。原先是 `cropMenu` 底部的两个按钮 —— 挤在一个浮层里,
+    /// 而这两个动作恰恰是「看着画布再决定」的一环,搬到画布上位置感才对。
+    /// ⚠️ 这两项**全仓库只有此处与 `cropMenu`(已移除)两处入口**,属于搬家不是删除。
+    private func cropContextMenu() -> NSMenu? {
+        guard !previewFailed else { return nil }
+        let menu = NSMenu()
+        contextBoxes.removeAll()
+        menu.addItem(menuItem("全选") {
+            mutateSelection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        })
+        menu.addItem(menuItem("重置选框") {
+            mutateSelection(CGRect(x: 0.08, y: 0.08, width: 0.84, height: 0.84))
+        })
+        return menu
     }
 
     @State private var tapCandidate = false
@@ -1875,6 +1957,35 @@ struct EditView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+}
+
+/// 工具属性面板的锚点。
+///
+/// 面板一次只开一块,所以只需要「当前工具那个按钮」的 bounds —— 用可选值表达,
+/// 免掉 `[EditTool: Anchor<CGRect>]` 这类字典(也就不需要 `EditTool: Hashable` 之外的东西)。
+/// 其余按钮的 transform 返回 nil,在 `reduce` 里被忽略。
+///
+/// `defaultValue` 刻意写成**计算属性**而不是 `static let`:`Anchor` 不是 `Sendable`,
+/// 存成静态存储属性在 Swift 6 语言模式下会被判「非并发安全」。
+private struct ToolAnchorKey: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
+/// 自绘面板的外观:尽量贴近系统 popover(材质底 + 0.5px 描边 + 柔和阴影)。
+/// 用 `.regularMaterial` 而不是纯色 —— 编辑态的画布底色可切换(浅/深),材质会自动跟随。
+private struct ToolPanelBackground: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(.regularMaterial)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
     }
 }
 
