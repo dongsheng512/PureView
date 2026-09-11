@@ -169,6 +169,8 @@ struct ThumbnailGridView: View {
             if store.isTextInputFocused { store.isTextInputFocused = false }
         }
         .padding(.horizontal, 12)
+        // 顶上留一拍:标题行自带 6pt 底内边距,不加这个过滤框会贴着标题行的 hover 高亮
+        .padding(.top, 6)
         .padding(.bottom, 6)
     }
 
