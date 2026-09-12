@@ -34,8 +34,8 @@ struct MainContentView: View {
     @State private var lastHoverLocation: CGPoint?
     /// 纯净模式期间常驻的本地 mouseMoved 监视器,喂两处边缘热区(右上角退出按钮 / 底边控制条)
     @State private var hoverMonitor: Any?
-    // 纯净模式的退出按钮(甲+丙):进模式先满不透明 3 秒让人看见,再淡成"幽灵";
-    // 鼠标进右上角热区恢复满不透明,离开 2.5 秒淡回去 —— 与底部 HUD 同一套节拍。
+    // 纯净模式的退出按钮:**静止时完全不显示**,只有进模式先满不透明 3 秒亮一次(教一次);
+    // 之后鼠标进右上角热区才淡入,离开 2.5 秒淡回透明 —— 与底部控制条同一套节拍。
     @State private var exitAffordanceVisible = false
     @State private var exitAffordanceInZone = false
     @State private var exitFadeGeneration = 0
@@ -225,42 +225,59 @@ struct MainContentView: View {
         }
     }
 
+    /// 两处边缘热区的尺寸(pt,相对窗口)。集中在这里,调的时候只改这两行。
+    /// - 右上角出口:按钮静止时**完全不显示**(见 `exitGhostIconOpacity`),全靠这块热区唤出,
+    ///   所以给得比按钮本体(28×22)宽裕得多 —— 240×120 约为原先 120×64 的 4 倍面积。
+    /// - 底边幻灯片控制条:只在幻灯片会话里生效。
+    private static let exitHotZone = CGSize(width: 240, height: 120)
+    private static let slideshowHotZoneHeight: CGFloat = 160
+
     private func noteMouseActivity() {
         guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
         let mouse = NSEvent.mouseLocation
         let frame = window.frame
-        // 甲+丙:右上角 120×64 热区。进区恢复满不透明,出区 2.5 秒淡回幽灵态。
+        // 右上角出口热区,进区恢复满不透明、出区 2.5 秒淡回。
         // 只在"跨过区界"那一帧动状态,免得每次 mouseMoved 都重启动画。
-        let inExitZone = mouse.x > frame.maxX - 120 && mouse.y > frame.maxY - 64
+        //
+        // 四条边都夹在窗口内是有意的:这里原先是 `mouse.x > maxX - w && mouse.y > maxY - h`,
+        // 没有上界/右界 —— 鼠标跑到窗口**外面**的右上角(别的窗口、菜单栏)同样算命中。
+        // 120×64 时还不明显,热区一放大就变成"鼠标在屏幕上半部晃都算",所以顺手补齐。
+        let inExitZone = mouse.x <= frame.maxX && mouse.y <= frame.maxY
+            && mouse.x > frame.maxX - Self.exitHotZone.width
+            && mouse.y > frame.maxY - Self.exitHotZone.height
         if inExitZone != exitAffordanceInZone {
             exitAffordanceInZone = inExitZone
             showExitAffordance(fadeAfter: inExitZone ? nil : 2.5)
         }
-        // 底边 160pt 热区。**只有幻灯片会话里才浮现** —— 不播放时纯净模式不该有任何浮层,
+        // 底边热区。**只有幻灯片会话里才浮现** —— 不播放时纯净模式不该有任何浮层,
         // 而控制条在会话开始时已经弹过一次,没必要靠鼠标扫过底边再把它叫回来。
         guard store.isSlideshowActive else { return }
-        guard mouse.y - frame.minY < 160 else { return }
+        let heightAboveBottom = mouse.y - frame.minY
+        guard heightAboveBottom >= 0, heightAboveBottom < Self.slideshowHotZoneHeight else { return }
         if let last = lastHoverLocation,
            abs(mouse.x - last.x) < 6, abs(mouse.y - last.y) < 6 { return }
         lastHoverLocation = mouse
         showSlideshowHUD()
     }
 
-    // MARK: 纯净模式的退出按钮显隐(甲+丙)
+    // MARK: 纯净模式的退出按钮显隐(纯热区唤出)
 
-    /// 静止态图标的不透明度。留在 0 以上是有意的:纯隐藏等于"鼠标不来就没人知道它存在",
-    /// 而这里要的是"静止时不打扰,想找时看得见"。
-    private static let exitGhostIconOpacity: Double = 0.45
+    /// 静止态图标的不透明度。**2026-09-12 起为 0 = 完全不显示** ——
+    /// 纯净模式要的是"一张图,上面什么都没有",之前那个 0.45 的幽灵图标仍然能看见。
+    /// 代价是可发现性:静止时画面里没有任何提示,只有"进模式先满不透明 3 秒"教一次。
+    /// 留成常量而不是直接写 0,是为了改主意时只动这一个数(想要幽灵态就调到 0.1~0.2)。
+    private static let exitGhostIconOpacity: Double = 0
 
     /// 静止态图标直接压在图片上、没有底材托着,所以补一层**与图标反色**的描边:
     /// 深色外观(白图标)配黑晕 → 浅色图片上也认得出;浅色外观(深图标)配白晕 → 深色图片上也认得出。
+    /// (静止态 opacity 为 0 时这层描边也跟着看不见,它只在现身/淡出过程中起作用。)
     private var exitGlyphHalo: Color {
         colorScheme == .dark ? Color.black.opacity(0.45) : Color.white.opacity(0.85)
     }
 
-    /// 纯净模式右上角的出口。**静止时不画"按钮",只留一个单薄的图标**;
-    /// 鼠标靠近(角上 120×64 热区,或直接悬停图标本体)时底材淡入、图标回满不透明。
-    /// 这样静止时画面里没有方块、只有一个小图标,但出口始终"看得见、找得到"。
+    /// 纯净模式右上角的出口。**静止时完全不显示**(`exitGhostIconOpacity == 0`),
+    /// 鼠标进右上角热区(见 `exitHotZone`)才淡入成"一个完整的按钮"。
+    /// 进模式时会先满不透明亮 3 秒再淡掉,那 3 秒是唯一一次"告诉用户出口在这儿"的机会。
     private var exitAffordance: some View {
         Button {
             store.toggleImmersive()
@@ -270,7 +287,7 @@ struct MainContentView: View {
                 .foregroundStyle(.primary)
                 .shadow(color: exitGlyphHalo, radius: 2, y: 0.5)
                 .frame(width: 28, height: 22)
-                // "按钮"这块底只在现身时存在:静止态它是 0,所以画面里只有一个图标、没有方块。
+                // "按钮"这块底只在现身时存在,静止态没有底材 —— 连图标也一起是 0(见外层 opacity)
                 .background {
                     RoundedRectangle(cornerRadius: 5)
                         .fill(.regularMaterial)
@@ -281,11 +298,10 @@ struct MainContentView: View {
         }
         .buttonStyle(.plain)
         .help("退出只看图 (Esc / F)")
-        // 兜底路径:悬停按钮本体(28×22)也恢复满不透明。
-        // 之所以还要这一条:角上那块 120×64 热区靠 `mouseMoved` 事件驱动,
-        // 而全项目没有一处开过 `acceptsMouseMovedEvents`,浏览态画布也没装
-        // 带 .mouseMoved 的 tracking area —— 万一事件根本不生成,按钮就永远停在幽灵态。
-        // 这一条挂在 `.padding(12)` **之前**,命中区就是按钮本体,不会在窗口角上留死区。
+        // 悬停按钮本体(28×22)也保持现身。现在按钮静止时是透明的,所以这条已经**不是**
+        // 主路径 —— 真正唤出它的是右上角那块 240×120 热区(靠本地 mouseMoved 监视器,
+        // 已由实机确认可用),热区远大于按钮本体,不存在点不到的死角。
+        // 留着是为了"鼠标已经停在按钮上"时别淡走,与热区里那条 `fadeAfter: nil` 同义。
         .onContinuousHover { phase in
             switch phase {
             case .active: showExitAffordance()
@@ -294,7 +310,7 @@ struct MainContentView: View {
         }
     }
 
-    /// 让退出按钮回到满不透明。`fadeAfter` 秒后自动淡回幽灵态;传 nil = 保持满不透明
+    /// 让退出按钮现身。`fadeAfter` 秒后自动淡回透明;传 nil = 保持不透明
     /// (鼠标还在热区/按钮上)。generation 递增即作废上一个待执行的淡出。
     private func showExitAffordance(fadeAfter seconds: Double? = nil) {
         exitFadeGeneration += 1
