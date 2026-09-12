@@ -30,8 +30,8 @@ struct SidebarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             ZStack {
-                SidebarMaterial(dark: canvasBackground.isDark)
-                ChromeTheme.sidebarWash(for: sidebarScheme)
+                SidebarMaterial(dark: canvasBackground.prefersDarkChrome)
+                ChromeTheme.sidebarWash(for: canvasBackground)
             }
         }
         // 侧栏内文字/选中态/控件颜色跟随画布背景明暗
@@ -129,8 +129,54 @@ struct SidebarMaterial: NSViewRepresentable {
     }
 
     private func applyAppearance(to view: NSVisualEffectView) {
-        // 磨砂材质的明暗由外观决定;画布选黑时强制深色外观,得到黑色磨砂
+        // 磨砂材质的明暗由外观决定;深色界面档位强制深色外观,得到深色磨砂
         view.appearance = NSAppearance(named: dark ? .vibrantDark : .aqua)
+    }
+}
+
+/// 整窗的磨砂玻璃底衬。**只有画布背景选「磨砂」时才挂**
+/// (挂载点见 `MainContentView.body`)。
+///
+/// `blendingMode = .behindWindow` 要求窗口本身非不透明 —— 这一点由
+/// `ChromeView.stripTitlebar()` 保证(`window.isOpaque = false` + 背景色 `.clear`),
+/// 侧栏的 `SidebarMaterial` 也依赖同一个前提。
+///
+/// 与侧栏那层的关系:两层都是向**窗口背后**取景(不是互相取景),所以不会叠加成双重模糊。
+///
+/// **不要再往上面叠提白层。** 试过一层半透明白(`Y' = Y·(1−k) + 255k`)想把这一档
+/// 从"磨砂黑"提亮到中灰,实机看过被否决 —— 提白之后玻璃的层次感被压平,
+/// 观感不如原样的系统材质。要动就动 `material` 档位本身。
+struct GlassBackdrop: View {
+    var canvas: CanvasBackground
+
+    var body: some View {
+        GlassMaterial(canvas: canvas)
+    }
+}
+
+/// 玻璃的系统材质本身。`behindWindow` 会把窗口后面的桌面采进来 ——
+/// **桌面是深色时它就是深的**,这是这一档偏暗的来源,刻意保留。
+struct GlassMaterial: NSViewRepresentable {
+    var canvas: CanvasBackground
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        // 整窗大面积底衬用 underWindowBackground;`.sidebar` 那档是给窄面板调的,铺满全窗偏重
+        view.material = .underWindowBackground
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        applyAppearance(to: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        applyAppearance(to: nsView)
+    }
+
+    private func applyAppearance(to view: NSVisualEffectView) {
+        let wanted = NSAppearance(named: canvas.prefersDarkChrome ? .vibrantDark : .aqua)
+        // 判等再写:这是每次 SwiftUI 重渲染都会跑到的路径(P1-3 / afa642f 同一类问题)
+        if view.appearance != wanted { view.appearance = wanted }
     }
 }
 
@@ -138,17 +184,28 @@ enum ChromeTheme {
     /// 主区背景(欢迎页 / 画布浅色 #FAFAFB)
     static let mainAreaFill = Color(red: 0.980, green: 0.980, blue: 0.984)
 
-    static func sidebarWash(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.clear : Color.white.opacity(0.10)
+    /// 侧栏洗色:浅色档给一层很淡的白,侧栏才比主区略"浮"起来一点。
+    /// 深色档与磨砂档都不洗色 —— 磨砂档的侧栏与画布要呈现**同一层窗口玻璃**,叠色就对不上了。
+    static func sidebarWash(for canvas: CanvasBackground) -> Color {
+        canvas.prefersDarkChrome ? .clear : Color.white.opacity(0.10)
     }
 
     static func fill(_ canvas: CanvasBackground) -> Color {
-        canvas.isDark ? Color(white: 0.10) : mainAreaFill
+        switch canvas {
+        case .dark: Color(white: 0.10)
+        case .light: mainAreaFill
+        // 磨砂档:顶栏交出底色,由窗口背后的玻璃材质呈现(见 GlassBackdrop)
+        case .frosted: Color.clear
+        }
     }
 
     /// 编辑/浏览画布:比顶栏底栏略深,工作区才从界面里分出来。
     static func canvasFill(_ canvas: CanvasBackground) -> Color {
-        canvas.isDark ? Color(white: 0.07) : Color(red: 0.945, green: 0.945, blue: 0.950)
+        switch canvas {
+        case .dark: Color(white: 0.07)
+        case .light: Color(red: 0.945, green: 0.945, blue: 0.950)
+        case .frosted: Color.clear
+        }
     }
 
     /// 编辑工具条与顶栏同一底色,只靠 hairline 分开,避免两层色块。
@@ -157,12 +214,12 @@ enum ChromeTheme {
     }
 
     static func colorScheme(for canvas: CanvasBackground) -> ColorScheme {
-        canvas.isDark ? .dark : .light
+        canvas.prefersDarkChrome ? .dark : .light
     }
 
     /// 顶栏与编辑条之间的淡实线(不透明,避免透出窗口)
     static func hairline(_ canvas: CanvasBackground) -> Color {
-        canvas.isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)
+        canvas.prefersDarkChrome ? Color.white.opacity(0.10) : Color.black.opacity(0.06)
     }
 }
 
@@ -181,8 +238,8 @@ struct SidebarTopBackground: View {
 
     var body: some View {
         ZStack {
-            SidebarMaterial(dark: canvasBackground.isDark)
-            ChromeTheme.sidebarWash(for: ChromeTheme.colorScheme(for: canvasBackground))
+            SidebarMaterial(dark: canvasBackground.prefersDarkChrome)
+            ChromeTheme.sidebarWash(for: canvasBackground)
         }
     }
 }

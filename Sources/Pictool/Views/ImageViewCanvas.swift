@@ -141,7 +141,8 @@ struct ImageViewCanvas: NSViewRepresentable {
             scrollView.automaticallyAdjustsContentInsets = false
             scrollView.contentInsets = NSEdgeInsets()
             scrollView.borderType = .noBorder
-            scrollView.drawsBackground = true
+            // 磨砂档:滚动视图不能自己铺底色,否则整块画布会盖住窗口背后的玻璃
+            scrollView.drawsBackground = !parent.background.isTranslucent
             scrollView.backgroundColor = parent.background.color
             // 捏合不走系统 magnification(手势结束兑换 frame 必有一次跳变),与滚轮同一套 applyScale
             scrollView.allowsMagnification = false
@@ -301,7 +302,8 @@ struct ImageViewCanvas: NSViewRepresentable {
         func applyBackground(_ background: CanvasBackground) {
             guard appliedBackground != background else { return }
             appliedBackground = background
-            scrollView.drawsBackground = true
+            // 磨砂档:交出底色,让窗口背后那层玻璃透上来(与 init 里同一处约束)
+            scrollView.drawsBackground = !background.isTranslucent
             scrollView.backgroundColor = background.color
             clipView.drawsBackground = false
             clipView.canvasBackground = background
@@ -1021,9 +1023,18 @@ final class CanvasClipView: NSClipView {
     private static let horizontalSwipeThreshold: CGFloat = 55
     private static let swipeCommitMinInterval: TimeInterval = 0.30
 
-    override var isOpaque: Bool { true }
+    /// 磨砂档必须交出不透明 —— 否则这块画布会盖住窗口背后的玻璃,磨砂就白做了。
+    /// 切换档位时 `canvasBackground` 的 `didSet` 会置脏,AppKit 会重新读一次这个属性。
+    override var isOpaque: Bool { !canvasBackground.isTranslucent }
 
     override func draw(_ dirtyRect: NSRect) {
+        // 磨砂档不画底色,但**必须把这块擦成透明**:非不透明的视图不会自动清理自己的
+        // 绘制区域,只「跳过填充」会留下上一帧的残影。
+        if canvasBackground.isTranslucent {
+            NSColor.clear.set()
+            dirtyRect.fill(using: .clear)
+            return
+        }
         canvasBackground.fill(dirtyRect)
     }
 

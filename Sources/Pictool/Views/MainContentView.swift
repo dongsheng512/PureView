@@ -54,7 +54,15 @@ struct MainContentView: View {
             }
         }
         .frame(minWidth: 960, minHeight: 600)
+        // 磨砂档:整窗垫一层玻璃。**必须挂在 `WindowChrome` 之后** —— SwiftUI 里后挂的
+        // background 在更底层,这样它才垫在整个界面下面。窗口非不透明这一前提由
+        // WindowChrome 里的 `stripTitlebar()` 保证,与侧栏的 `SidebarMaterial` 同源。
         .background(WindowChrome(immersive: store.isImmersive, allowBackgroundMove: !store.isEditing))
+        .background {
+            if canvasBackground.isTranslucent {
+                GlassBackdrop(canvas: canvasBackground)
+            }
+        }
         .onAppear {
             CanvasBackground.normalizeStoredValue()
             runZoomSelfTestIfRequested()
@@ -361,7 +369,9 @@ struct MainContentView: View {
                         .overlay(alignment: .trailing) {
                             Rectangle()
                                 .fill(
-                                    canvasBackground.isDark
+                                    // 分隔线跟随「派生界面明暗」而不是「画布是不是黑的」:
+                                    // 磨砂档没有底色,但它按深色界面渲染,这条线得是白线
+                                    canvasBackground.prefersDarkChrome
                                         ? Color.white.opacity(isHoveringDivider ? 0.22 : 0.12)
                                         : Color.black.opacity(isHoveringDivider ? 0.14 : 0.07)
                                 )
