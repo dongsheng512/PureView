@@ -39,6 +39,8 @@ struct MainContentView: View {
     @State private var exitAffordanceVisible = false
     @State private var exitAffordanceInZone = false
     @State private var exitFadeGeneration = 0
+    /// 窗口是否处于全屏。全屏时红绿灯交还系统标题栏,应用顶栏让出那一格(见 `PureHeader`)
+    @State private var isFullScreen = false
 
     private var sortPreference: ImageSortPreference {
         ImageSortPreference(key: sortKey, direction: sortDirection)
@@ -84,6 +86,14 @@ struct MainContentView: View {
                 slideshowHoverGeneration += 1
                 withAnimation(.easeInOut(duration: 0.2)) { slideshowHUDVisible = false }
             }
+        }
+        // 全屏 / 退出全屏:告诉 PureHeader 是否要让出红绿灯那一格。
+        // 通知是全局的,按 object 认窗口,免得别的窗口(如打开面板)全屏时误判。
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
+            if (note.object as? NSWindow) === NSApp.keyWindow { isFullScreen = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
+            if (note.object as? NSWindow) === NSApp.keyWindow { isFullScreen = false }
         }
         .onChange(of: wrapNavigation) { _, value in
             store.wrapNavigation = value
@@ -351,7 +361,7 @@ struct MainContentView: View {
             // 侧栏收放动画:transition 早已写好(滑入+淡入),此前缺动画通道导致单帧硬切;
             // 只绑 sidebarVisible,分隔线拖拽宽度的即时性不受影响
             .animation(.easeInOut(duration: 0.22), value: store.sidebarVisible)
-            PureHeader(sidebarWidth: sidebarWidth)
+            PureHeader(sidebarWidth: sidebarWidth, isFullScreen: isFullScreen)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
         .ignoresSafeArea(edges: .top)
@@ -989,13 +999,36 @@ private struct WindowChrome: NSViewRepresentable {
 private final class ChromeView: NSView {
     var immersive = false
     var allowBackgroundMove = true
+    /// 见过的标题栏容器(全屏 / 非全屏要来回切显隐),以及它被压成 0 高之前的原始高度
+    private var titlebarViews: [NSView] = []
+    private var titlebarOriginalHeight: CGFloat = 0
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         apply()
         DispatchQueue.main.async { [weak self] in self?.stripTitlebar() }
+        observeWindowState()
     }
     override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); apply() }
     func apply() { stripTitlebar() }
+
+    /// 进出全屏要重跑一遍:全屏下标题栏是"还给系统"的,与平时正好相反。
+    /// 光靠 updateNSView 不行 —— SwiftUI 不会因为窗口进了全屏就重算这个视图。
+    private func observeWindowState() {
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: NSWindow.didEnterFullScreenNotification, object: nil)
+        center.removeObserver(self, name: NSWindow.didExitFullScreenNotification, object: nil)
+        guard let window else { return }
+        center.addObserver(self, selector: #selector(windowStateChanged),
+                           name: NSWindow.didEnterFullScreenNotification, object: window)
+        center.addObserver(self, selector: #selector(windowStateChanged),
+                           name: NSWindow.didExitFullScreenNotification, object: window)
+    }
+
+    @objc private func windowStateChanged() { stripTitlebar() }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
     private func stripTitlebar() {
         WindowMoveControl.setBackgroundMove(allowBackgroundMove)
         guard let window else { return }
@@ -1004,12 +1037,20 @@ private final class ChromeView: NSView {
         if window.frameAutosaveName.isEmpty {
             window.setFrameAutosaveName("MainWindow")
         }
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.title = ""
+        // 全屏时把标题栏还给系统:macOS 会把它抽成屏幕顶部那条自动隐藏的栏,
+        // 显示"应用名 + 红绿灯"。此前这里一刀切地藏掉标题栏,全屏时那条栏就是空的,
+        // 红绿灯只能留在应用自己的顶栏里 —— 看起来就像"全屏了,窗口还是原来那个"。
+        let fullScreen = window.styleMask.contains(.fullScreen)
+        // 纯净模式要的是"只剩一张图",就算全屏了也不该冒出系统那条栏
+        let showSystemTitlebar = fullScreen && !immersive
+        // 全屏那条栏本身要看得见,所以别让它透明;平时仍然透明(应用顶栏自己画背景)
+        window.titlebarAppearsTransparent = !showSystemTitlebar
+        window.titleVisibility = showSystemTitlebar ? .visible : .hidden
+        window.title = showSystemTitlebar ? "PureView" : ""
         window.backgroundColor = .clear
         window.isOpaque = false
-        let radius: CGFloat = immersive ? 0 : 10
+        // 全屏时没有窗口圆角可谈,留着会把内容四角切出圆角
+        let radius: CGFloat = (immersive || fullScreen) ? 0 : 10
         window.contentView?.wantsLayer = true
         window.contentView?.layer?.cornerRadius = radius
         window.contentView?.layer?.masksToBounds = true
@@ -1017,16 +1058,40 @@ private final class ChromeView: NSView {
         window.contentView?.superview?.layer?.cornerRadius = radius
         window.contentView?.superview?.layer?.masksToBounds = true
         // 原生标题栏藏掉,避免挡自定义顶栏点击;红绿灯由 PureHeader 里的 NativeTrafficLights 接管。
-        // 纯净模式连按钮一起藏。
+        // 纯净模式连按钮一起藏。**全屏时反过来**:标题栏露出来,红绿灯也留回那儿。
         for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(b)?.isHidden = immersive
         }
-        if let theme = window.contentView?.superview {
-            for sub in theme.subviews where String(describing: type(of: sub)).contains("Titlebar") {
-                sub.isHidden = true
-                sub.frame.size.height = 0
+        for view in titlebarViews(in: window) {
+            if showSystemTitlebar {
+                view.isHidden = false
+                // 之前被压成 0 高,这里要还原,否则那条栏是一条零高度的缝
+                if titlebarOriginalHeight > 1, view.frame.size.height < 1 {
+                    view.frame.size.height = titlebarOriginalHeight
+                }
+            } else {
+                if titlebarOriginalHeight < 1, view.frame.size.height > 1 {
+                    titlebarOriginalHeight = view.frame.size.height
+                }
+                view.isHidden = true
+                view.frame.size.height = 0
             }
         }
+    }
+
+    /// 标题栏容器:用记住的那些(AppKit 进出全屏时可能把它挪进另一个窗口,
+    /// 那时按类型名在 theme frame 的子树里就找不到了),再并上当前扫到的。
+    /// 这里刻意不清理"看起来已经死掉"的引用 —— 过渡中途 superview 可能短暂为 nil,
+    /// 一旦清掉就再也无法把它露出来;一个窗口最多也就这么一两个容器,留着无妨。
+    private func titlebarViews(in window: NSWindow) -> [NSView] {
+        if let theme = window.contentView?.superview {
+            for sub in theme.subviews
+            where String(describing: type(of: sub)).contains("Titlebar")
+                && !titlebarViews.contains(where: { $0 === sub }) {
+                titlebarViews.append(sub)
+            }
+        }
+        return titlebarViews
     }
 }
 

@@ -8,6 +8,8 @@ struct PureHeader: View {
     @Environment(FolderStore.self) private var store
     /// 侧栏可见时的宽度,用来把顶栏左段切成独立的「侧栏顶」
     var sidebarWidth: CGFloat? = nil
+    /// 全屏时红绿灯交还给了系统标题栏(屏幕顶部那条自动隐藏的栏),这里不再占那一格
+    var isFullScreen: Bool = false
     @AppStorage(SidebarTopStyle.storageKey) private var sidebarTopStyle = SidebarTopStyle.defaultValue
     @AppStorage(CanvasBackground.storageKey) private var canvasBackground = CanvasBackground.defaultValue
 
@@ -68,8 +70,11 @@ struct PureHeader: View {
 
     private var leftCluster: some View {
         HStack(spacing: 5) {
-            NativeTrafficLights()
-                .frame(width: NativeTrafficLights.width, height: NativeTrafficLights.height)
+            // 全屏时不摆红绿灯:它们在系统那条栏里,这里留空只会多出一截空档
+            if !isFullScreen {
+                NativeTrafficLights()
+                    .frame(width: NativeTrafficLights.width, height: NativeTrafficLights.height)
+            }
             HeaderButton("sidebar.leading", help: "显示/隐藏侧栏 (⌃⌘S)") {
                 store.toggleSidebar()
             }
@@ -196,6 +201,12 @@ final class NativeTrafficLightsView: NSView {
     private var hovering = false
     private static let buttonSpacing: CGFloat = 8
     private static let mouseInGroup = NSSelectorFromString("_setMouseInGroup:")
+    /// 按钮被接管前的原生父视图(标题栏容器)。全屏时要交还给它。
+    private weak var originalContainer: NSView?
+    /// 接管时所在的窗口。`viewWillMove(toWindow: nil)` 期间极少数情况下 `self.window` 已经空了,
+    /// 留一份兜底 —— 拿不到窗口就还不了按钮,全屏时会一个红绿灯都没有。
+    private weak var cachedWindow: NSWindow?
+    private static let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
 
     override var isOpaque: Bool { false }
 
@@ -203,6 +214,13 @@ final class NativeTrafficLightsView: NSView {
         super.viewDidMoveToWindow()
         embedButtons()
         DispatchQueue.main.async { [weak self] in self?.embedButtons() }
+    }
+
+    /// 视图被从窗口上摘掉之前(例如全屏时 SwiftUI 不再渲染这一格),先把红绿灯交还标题栏。
+    /// 漏了这一步,按钮会跟着这个 view 一起从窗口里消失 —— 全屏时就一个红绿灯都没有了。
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil { releaseButtons() }
     }
 
     override func layout() {
@@ -235,11 +253,20 @@ final class NativeTrafficLightsView: NSView {
 
     func embedButtons() {
         guard let window else { return }
-        let types: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        cachedWindow = window
+        // 全屏时把红绿灯交还系统标题栏 —— macOS 会把标题栏抽成屏幕顶部那条自动隐藏的栏,
+        // 应用名和红绿灯本来就该在那儿。继续接管的话,那条栏是空的,红绿灯会留在应用自己的
+        // 顶栏里,看起来就像"全屏了但窗口还是原来那个"。
+        if window.styleMask.contains(.fullScreen) {
+            releaseButtons()
+            return
+        }
         var x: CGFloat = 0
-        for type in types {
+        for type in Self.buttonTypes {
             guard let button = window.standardWindowButton(type) else { continue }
             if button.superview !== self {
+                // 只在第一次接管时记下原生容器;之后 button.superview 就是 self 了
+                if originalContainer == nil { originalContainer = button.superview }
                 button.removeFromSuperview()
                 addSubview(button)
             }
@@ -252,8 +279,32 @@ final class NativeTrafficLightsView: NSView {
         applyGroupHover()
     }
 
+    /// 把接管过来的红绿灯还回标题栏容器,位置交回 AppKit 自己摆。
+    private func releaseButtons() {
+        guard let window = window ?? cachedWindow else { return }
+        guard Self.buttonTypes.contains(where: { window.standardWindowButton($0)?.superview === self }) else { return }
+        let host = originalContainer ?? Self.findTitlebar(in: window)
+        for type in Self.buttonTypes {
+            guard let button = window.standardWindowButton(type), button.superview === self else { continue }
+            button.removeFromSuperview()
+            button.isHidden = false
+            host?.addSubview(button)
+        }
+        // 交还后立刻催一次布局:光标 needsLayout 要等下一轮 run loop,
+        // 全屏切换那一帧容易被人眼看到"按钮还堆在 (0,0)"。
+        host?.needsLayout = true
+        host?.layoutSubtreeIfNeeded()
+        window.contentView?.superview?.needsLayout = true
+        window.contentView?.superview?.layoutSubtreeIfNeeded()
+    }
+
+    private static func findTitlebar(in window: NSWindow) -> NSView? {
+        guard let theme = window.contentView?.superview else { return nil }
+        return theme.subviews.first { String(describing: type(of: $0)).contains("Titlebar") }
+    }
+
     private func applyGroupHover() {
-        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+        for type in Self.buttonTypes {
             guard let button = window?.standardWindowButton(type),
                   button.responds(to: Self.mouseInGroup) else { continue }
             button.perform(Self.mouseInGroup, with: NSNumber(value: hovering))
