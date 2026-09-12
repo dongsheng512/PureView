@@ -24,12 +24,14 @@ struct MainContentView: View {
     @AppStorage(ImageSortKey.storageKey) private var sortKey = ImageSortKey.defaultValue
     @AppStorage(ImageSortDirection.storageKey) private var sortDirection = ImageSortDirection.defaultValue
     @AppStorage(SlideShowInterval.storageKey) private var slideshowInterval = SlideShowInterval.defaultValue
-    // 幻灯片 HUD:鼠标移动浮现,静止 2.5 秒淡出;悬停在 HUD 上时保持
+    // 幻灯片控制条:**只在幻灯片会话里存在**。会话开始浮现一次,静止 2.5 秒淡出,
+    // 悬停在它上面时保持;不播放时鼠标扫过底边一概不弹(纯净模式就该是一张图)。
     @State private var slideshowHUDVisible = false
     @State private var isHoveringSlideshowHUD = false
     @State private var slideshowHoverGeneration = 0
     @State private var lastHoverLocation: CGPoint?
-    @State private var slideshowHoverMonitor: Any?
+    /// 纯净模式期间常驻的本地 mouseMoved 监视器,喂两处边缘热区(右上角退出按钮 / 底边控制条)
+    @State private var hoverMonitor: Any?
     // 纯净模式的退出按钮(甲+丙):进模式先满不透明 3 秒让人看见,再淡成"幽灵";
     // 鼠标进右上角热区恢复满不透明,离开 2.5 秒淡回去 —— 与底部 HUD 同一套节拍。
     @State private var exitAffordanceVisible = false
@@ -65,15 +67,21 @@ struct MainContentView: View {
             store.slideshowIntervalChanged()
         }
         .onChange(of: store.isImmersive) { _, immersive in
-            // 纯净模式全程挂本地事件监视器:鼠标移到底部热区即浮现幻灯片 HUD,
-            // 不必先开启播放(播放按钮在 HUD 里,可直接开播)
-            updateSlideshowHoverMonitor(active: immersive)
+            // 纯净模式全程挂本地事件监视器:右上角退出按钮的热区靠它
+            updateHoverMonitor(active: immersive)
             if !immersive {
                 withAnimation(.easeInOut(duration: 0.2)) { slideshowHUDVisible = false }
             }
         }
+        // 底部控制条只在**幻灯片会话**里存在:会话开始浮现一次,会话结束立刻收起。
+        // 不播放时鼠标扫过底边一概不弹 —— 纯净模式就该是一张图。
         .onChange(of: store.isSlideshowActive) { _, active in
-            if active { showSlideshowHUD() }
+            if active {
+                showSlideshowHUD()
+            } else {
+                slideshowHoverGeneration += 1
+                withAnimation(.easeInOut(duration: 0.2)) { slideshowHUDVisible = false }
+            }
         }
         .onChange(of: wrapNavigation) { _, value in
             store.wrapNavigation = value
@@ -181,7 +189,10 @@ struct MainContentView: View {
                     onToggle: { store.toggleSlideshow() },
                     onNext: { store.step(1) },
                     onCycleInterval: { slideshowInterval = store.slideshowInterval.next },
-                    onExit: { store.isSlideshowActive ? store.endSlideshow() : store.toggleImmersive() }
+                    // 控制条只在幻灯片会话里存在,所以 X 的含义很确定 = 结束会话
+                    // (并随之退出纯净模式)。原先那个 `: store.toggleImmersive()` 分支是给
+                    // "未开播也在底边浮现"的用法兜底的,那条路径已经取消,分支也就没了意义。
+                    onExit: { store.endSlideshow() }
                 )
                 .onHover { hovering in
                     isHoveringSlideshowHUD = hovering
@@ -197,7 +208,10 @@ struct MainContentView: View {
         .ignoresSafeArea()
     }
 
-    // MARK: 幻灯片 HUD 显隐(本地事件监视器,不受画布 NSView 吞掉 mouseMoved 影响)
+    // MARK: 边缘热区(本地事件监视器,不受画布 NSView 吞掉 mouseMoved 影响)
+    //
+    // 两处热区共用这一个监视器:右上角 120×64 → 退出按钮回满不透明;
+    // 底边 160pt → 幻灯片控制条(只在幻灯片会话里)。
 
     private func showSlideshowHUD() {
         slideshowHoverGeneration += 1
@@ -210,21 +224,21 @@ struct MainContentView: View {
         }
     }
 
-    private func updateSlideshowHoverMonitor(active: Bool) {
-        if active, slideshowHoverMonitor == nil {
-            slideshowHoverMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { event in
-                noteSlideshowActivity()
+    private func updateHoverMonitor(active: Bool) {
+        if active, hoverMonitor == nil {
+            hoverMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { event in
+                noteMouseActivity()
                 return event
             }
-        } else if !active, let monitor = slideshowHoverMonitor {
+        } else if !active, let monitor = hoverMonitor {
             NSEvent.removeMonitor(monitor)
-            slideshowHoverMonitor = nil
+            hoverMonitor = nil
             lastHoverLocation = nil
             exitAffordanceInZone = false
         }
     }
 
-    private func noteSlideshowActivity() {
+    private func noteMouseActivity() {
         guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
         let mouse = NSEvent.mouseLocation
         let frame = window.frame
@@ -235,7 +249,9 @@ struct MainContentView: View {
             exitAffordanceInZone = inExitZone
             showExitAffordance(fadeAfter: inExitZone ? nil : 2.5)
         }
-        // 底部 160pt 热区:鼠标进入才浮现 HUD,在其他区域移动不打扰
+        // 底边 160pt 热区。**只有幻灯片会话里才浮现** —— 不播放时纯净模式不该有任何浮层,
+        // 而控制条在会话开始时已经弹过一次,没必要靠鼠标扫过底边再把它叫回来。
+        guard store.isSlideshowActive else { return }
         guard mouse.y - frame.minY < 160 else { return }
         if let last = lastHoverLocation,
            abs(mouse.x - last.x) < 6, abs(mouse.y - last.y) < 6 { return }
@@ -882,8 +898,9 @@ struct MainContentView: View {
     }
 }
 
-/// 幻灯片播放 HUD:底部居中胶囊条,播放/暂停、前后切换、间隔循环、退出。
-/// 纯净模式下鼠标移到底部即浮现,未开播时也可直接在这里点播放。
+/// 幻灯片控制条:底部居中胶囊条,播放/暂停、前后切换、间隔循环、结束会话。
+/// **只在幻灯片会话里存在** —— 会话开始浮现一次、静止 2.5 秒淡出、鼠标移到窗口底边可再叫出来;
+/// 不播放时纯净模式里不该有任何浮层(此时退出走右上角按钮 / Esc / F / 菜单栏)。
 private struct SlideshowHUD: View {
     let playing: Bool
     var canPlay: Bool = true
