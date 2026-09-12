@@ -65,6 +65,10 @@ struct MainContentView: View {
             store.slideshowInterval = slideshowInterval
             store.applySortPreference(sortPreference)
             contactSheetOptions = ContactSheetOptions.loadFromDefaults()
+            // 兜底:`onChange` 只在状态**变化**时触发。若本视图是在"已经处于纯净模式"的情况下
+            // 被重建的(窗口重开、显式 openWindow 等),没有这一行就永远不注册监视器 ——
+            // 右上角热区彻底失效,而那个位置平时又是空的,用户会以为出口没了。
+            updateHoverMonitor(active: store.isImmersive)
         }
         .onChange(of: slideshowInterval) { _, value in
             store.slideshowInterval = value
@@ -232,8 +236,18 @@ struct MainContentView: View {
     private static let exitHotZone = CGSize(width: 240, height: 120)
     private static let slideshowHotZoneHeight: CGFloat = 160
 
+    /// 热区参考的窗口。**不能用 `keyWindow` 打头**:打开面板(`NSOpenPanel`)、颜色面板等
+    /// `NSPanel` 都会成为 keyWindow,那时热区就按面板那一小块 frame 去算,位置全错。
+    /// 本应用是单窗口(菜单里 `CommandGroup(replacing: .newItem)` 去掉了新建窗口),
+    /// 所以"第一个可见的非面板窗口"就是主窗口。
+    private var hoverReferenceWindow: NSWindow? {
+        if let w = NSApp.mainWindow, !(w is NSPanel) { return w }
+        if let w = NSApp.keyWindow, !(w is NSPanel) { return w }
+        return NSApp.windows.first { $0.isVisible && !($0 is NSPanel) }
+    }
+
     private func noteMouseActivity() {
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        guard let window = hoverReferenceWindow else { return }
         let mouse = NSEvent.mouseLocation
         let frame = window.frame
         // 右上角出口热区,进区恢复满不透明、出区 2.5 秒淡回。
@@ -383,6 +397,10 @@ struct MainContentView: View {
         .ignoresSafeArea(edges: .top)
         .onDisappear {
             WindowMoveControl.setBackgroundMove(true)
+            // 纯净模式下监视器是常驻的,视图消失时必须摘掉:否则它继续收事件、继续驱动一个
+            // 已经不在屏上的视图,而闭包还强持有本视图(连带 `store`,即整个 FolderStore)。
+            // 原先只有 `onChange(of: isImmersive)` 一条摘除路径 —— 关窗时那个 onChange 不会来。
+            updateHoverMonitor(active: false)
         }
     }
 
@@ -1015,6 +1033,13 @@ private struct WindowChrome: NSViewRepresentable {
 private final class ChromeView: NSView {
     var immersive = false
     var allowBackgroundMove = true
+    /// 应用名(全屏那条系统栏要显示它)。取自 Info.plist,避免与 `build.sh` 里的
+    /// `CFBundleName` 各写一份;取不到时退回 "PureView"。
+    private static let appName: String = {
+        guard let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String,
+              !name.isEmpty else { return "PureView" }
+        return name
+    }()
     /// 见过的标题栏容器(全屏 / 非全屏要来回切显隐),以及它被压成 0 高之前的原始高度
     private var titlebarViews: [NSView] = []
     private var titlebarOriginalHeight: CGFloat = 0
@@ -1062,7 +1087,8 @@ private final class ChromeView: NSView {
         // 全屏那条栏本身要看得见,所以别让它透明;平时仍然透明(应用顶栏自己画背景)
         window.titlebarAppearsTransparent = !showSystemTitlebar
         window.titleVisibility = showSystemTitlebar ? .visible : .hidden
-        window.title = showSystemTitlebar ? "PureView" : ""
+        // 用 Info.plist 的 CFBundleName,别在这里再硬写一遍应用名(改一次要记得改两处)
+        window.title = showSystemTitlebar ? Self.appName : ""
         window.backgroundColor = .clear
         window.isOpaque = false
         // 全屏时没有窗口圆角可谈,留着会把内容四角切出圆角

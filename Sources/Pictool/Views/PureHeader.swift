@@ -294,19 +294,21 @@ final class NativeTrafficLightsView: NSView {
         guard let window = window ?? cachedWindow else { return }
         guard window.styleMask.contains(.fullScreen) else { return }
         guard Self.buttonTypes.contains(where: { window.standardWindowButton($0)?.superview === self }) else { return }
-        let host = originalContainer ?? Self.findTitlebar(in: window)
+        // 找不到落点就**什么都别做**:先把按钮从自己身上摘下来、又没地方放,它们就成了
+        // 没有父视图的孤儿 —— 全屏时一个红绿灯都不会有。宁可维持在旧位置。
+        guard let host = originalContainer ?? Self.findTitlebar(in: window) else { return }
         for type in Self.buttonTypes {
             guard let button = window.standardWindowButton(type), button.superview === self else { continue }
             button.removeFromSuperview()
             // 刻意**不动** `isHidden`:按钮显隐的唯一归属是 ChromeView.stripTitlebar()
             // (它按 immersive 决定)。这里顺手点亮的话,纯净模式(标题栏容器只是被隐藏、
             // 高度可能被 AppKit 还原)下按钮就会露出来。
-            host?.addSubview(button)
+            host.addSubview(button)
         }
         // 交还后立刻催一次布局:光标 needsLayout 要等下一轮 run loop,
         // 全屏切换那一帧容易被人眼看到"按钮还堆在 (0,0)"。
-        host?.needsLayout = true
-        host?.layoutSubtreeIfNeeded()
+        host.needsLayout = true
+        host.layoutSubtreeIfNeeded()
         window.contentView?.superview?.needsLayout = true
         window.contentView?.superview?.layoutSubtreeIfNeeded()
     }
