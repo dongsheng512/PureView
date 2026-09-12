@@ -30,6 +30,11 @@ struct MainContentView: View {
     @State private var slideshowHoverGeneration = 0
     @State private var lastHoverLocation: CGPoint?
     @State private var slideshowHoverMonitor: Any?
+    // 纯净模式的退出按钮(甲+丙):进模式先满不透明 3 秒让人看见,再淡成"幽灵";
+    // 鼠标进右上角热区恢复满不透明,离开 2.5 秒淡回去 —— 与底部 HUD 同一套节拍。
+    @State private var exitAffordanceVisible = false
+    @State private var exitAffordanceInZone = false
+    @State private var exitFadeGeneration = 0
 
     private var sortPreference: ImageSortPreference {
         ImageSortPreference(key: sortKey, direction: sortDirection)
@@ -118,10 +123,26 @@ struct MainContentView: View {
                         .foregroundStyle(.primary)
                         .frame(width: 28, height: 22)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("退出只看图 (Esc)")
+                .help("退出只看图 (Esc / F)")
+                // 兜底路径:悬停按钮本体(28×22)也恢复满不透明。
+                // 之所以还要这一条:角上那块 120×64 热区靠 `mouseMoved` 事件驱动,
+                // 而全项目没有一处开过 `acceptsMouseMovedEvents`,浏览态画布也没装
+                // 带 .mouseMoved 的 tracking area —— 万一事件根本不生成,按钮就永远停在幽灵态。
+                // 这一条挂在 `.padding(12)` **之前**,命中区就是按钮本体,不会在窗口角上留死区。
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active: showExitAffordance()
+                    case .ended: showExitAffordance(fadeAfter: 2.5)
+                    }
+                }
                 .padding(12)
+                // 幽灵态:留一块极淡的底,看得出"这儿有个东西",又不构成画面里的一个方块。
+                // 不降到 0 是因为那样等于纯隐藏,鼠标不来就没人知道它存在。
+                .opacity(exitAffordanceVisible ? 1 : Self.exitGhostOpacity)
+                .onAppear { showExitAffordance(fadeAfter: 3) }
             }
         }
         .onExitCommand {
@@ -199,6 +220,7 @@ struct MainContentView: View {
             NSEvent.removeMonitor(monitor)
             slideshowHoverMonitor = nil
             lastHoverLocation = nil
+            exitAffordanceInZone = false
         }
     }
 
@@ -206,12 +228,43 @@ struct MainContentView: View {
         guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
         let mouse = NSEvent.mouseLocation
         let frame = window.frame
+        // 甲+丙:右上角 120×64 热区。进区恢复满不透明,出区 2.5 秒淡回幽灵态。
+        // 只在"跨过区界"那一帧动状态,免得每次 mouseMoved 都重启动画。
+        let inExitZone = mouse.x > frame.maxX - 120 && mouse.y > frame.maxY - 64
+        if inExitZone != exitAffordanceInZone {
+            exitAffordanceInZone = inExitZone
+            showExitAffordance(fadeAfter: inExitZone ? nil : 2.5)
+        }
         // 底部 160pt 热区:鼠标进入才浮现 HUD,在其他区域移动不打扰
         guard mouse.y - frame.minY < 160 else { return }
         if let last = lastHoverLocation,
            abs(mouse.x - last.x) < 6, abs(mouse.y - last.y) < 6 { return }
         lastHoverLocation = mouse
         showSlideshowHUD()
+    }
+
+    // MARK: 纯净模式的退出按钮显隐(甲+丙)
+
+    /// 幽灵态不透明度。留在 0 以上是有意的:纯隐藏等于"鼠标不来就没人知道它存在",
+    /// 而这里要的是"静止时不打扰,想找时看得见"。
+    private static let exitGhostOpacity: Double = 0.32
+
+    /// 让退出按钮回到满不透明。`fadeAfter` 秒后自动淡回幽灵态;传 nil = 保持满不透明
+    /// (鼠标还在热区/按钮上)。generation 递增即作废上一个待执行的淡出。
+    private func showExitAffordance(fadeAfter seconds: Double? = nil) {
+        exitFadeGeneration += 1
+        let gen = exitFadeGeneration
+        if !exitAffordanceVisible {
+            withAnimation(.easeInOut(duration: 0.15)) { exitAffordanceVisible = true }
+        }
+        guard let seconds else { return }
+        Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            // 指针还在右上角(按钮上或热区里)就不淡:悬停与热区两条路径会互相覆盖,
+            // 少了这个判断就会出现"鼠标明明停在角上、按钮却淡走了"。
+            guard gen == exitFadeGeneration, !exitAffordanceInZone else { return }
+            withAnimation(.easeInOut(duration: 0.35)) { exitAffordanceVisible = false }
+        }
     }
 
     private var normalLayer: some View {
