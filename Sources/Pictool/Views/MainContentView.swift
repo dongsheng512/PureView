@@ -7,8 +7,6 @@ import UniformTypeIdentifiers
 struct MainContentView: View {
 
     @Environment(FolderStore.self) private var store
-    /// 只用于给纯净模式右上角的图标挑"反色描边"(见 `exitGlyphHalo`)
-    @Environment(\.colorScheme) private var colorScheme
     @State private var isPreparingPrint = false
     // 拼版打印:选项弹层 + 解码期间的门禁(与 isPreparingPrint 分开,
     // 因为它还要在弹层里禁按钮)
@@ -185,6 +183,9 @@ struct MainContentView: View {
                     // "未开播也在底边浮现"的用法兜底的,那条路径已经取消,分支也就没了意义。
                     onExit: { store.endSlideshow() }
                 )
+                // 与出口按钮同一处理:控制条的材质跟画布,不跟系统外观,
+                // 否则黑画布上会浮出一条浅灰胶囊
+                .environment(\.colorScheme, canvasScheme)
                 .onHover { hovering in
                     isHoveringSlideshowHUD = hovering
                     // 进入 HUD 时 showSlideshowHUD 里的 generation 作废旧计时,
@@ -282,11 +283,17 @@ struct MainContentView: View {
     /// 留成常量而不是直接写 0,是为了改主意时只动这一个数(想要幽灵态就调到 0.1~0.2)。
     private static let exitGhostIconOpacity: Double = 0
 
+    /// 纯净模式浮层(出口按钮、幻灯片控制条)该用的色系 —— **跟画布,不跟系统外观**。
+    /// `canvasBackground` 与系统外观是两件独立的事:系统浅色 + 黑画布时若按系统外观渲染,
+    /// `.regularMaterial` 会是**浅灰磨砂**,出口按钮就成了"黑底上一块白",非常突兀。
+    /// 顶栏一直在用这同一个映射(`PureHeader` 里 `.environment(\.colorScheme, …)`)。
+    private var canvasScheme: ColorScheme { ChromeTheme.colorScheme(for: canvasBackground) }
+
     /// 静止态图标直接压在图片上、没有底材托着,所以补一层**与图标反色**的描边:
-    /// 深色外观(白图标)配黑晕 → 浅色图片上也认得出;浅色外观(深图标)配白晕 → 深色图片上也认得出。
+    /// 深色画布(白图标)配黑晕 → 浅色图片上也认得出;浅色画布(深图标)配白晕 → 深色图片上也认得出。
     /// (静止态 opacity 为 0 时这层描边也跟着看不见,它只在现身/淡出过程中起作用。)
     private var exitGlyphHalo: Color {
-        colorScheme == .dark ? Color.black.opacity(0.45) : Color.white.opacity(0.85)
+        canvasScheme == .dark ? Color.black.opacity(0.45) : Color.white.opacity(0.85)
     }
 
     /// 纯净模式右上角的出口。**静止时完全不显示**(`exitGhostIconOpacity == 0`),
@@ -311,6 +318,8 @@ struct MainContentView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // 材质与图标都跟画布走:不灌这一条,系统浅色 + 黑画布时就是"黑底上一块浅灰磨砂"
+        .environment(\.colorScheme, canvasScheme)
         .help("退出只看图 (Esc / F)")
         // 悬停按钮本体(28×22)也保持现身。现在按钮静止时是透明的,所以这条已经**不是**
         // 主路径 —— 真正唤出它的是右上角那块 240×120 热区(靠本地 mouseMoved 监视器,
