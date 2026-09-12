@@ -199,7 +199,6 @@ struct NativeTrafficLights: NSViewRepresentable {
 final class NativeTrafficLightsView: NSView {
     private var tracking: NSTrackingArea?
     private var hovering = false
-    private static let buttonSpacing: CGFloat = 8
     private static let mouseInGroup = NSSelectorFromString("_setMouseInGroup:")
     /// 按钮被接管前的原生父视图(标题栏容器)。全屏时要交还给它。
     private weak var originalContainer: NSView?
@@ -221,8 +220,8 @@ final class NativeTrafficLightsView: NSView {
 
     /// 换显示器 / 换缩放时,AppKit 会重排 theme frame(标题栏容器的高度可能被还原,
     /// 标准按钮甚至会被塞回标题栏)。这条路上我们收不到任何"SwiftUI 该重新布局"的信号 ——
-    /// 窗口尺寸没变,`layout()` 就不会触发 —— 于是红绿灯要么跑回原生位置、要么整个不见。
-    /// 所以自己盯住窗口的换屏 / 换缩放通知,收到就把按钮重新接管回来。
+    /// 窗口尺寸没变,`layout()` 就不会触发。所以自己盯住窗口的换屏 / 换缩放通知,
+    /// 收到就把坐标系重新对齐一遍。
     private func observeOwnerWindow() {
         let center = NotificationCenter.default
         center.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
@@ -281,6 +280,19 @@ final class NativeTrafficLightsView: NSView {
         applyGroupHover()
     }
 
+    /// 把窗口的三个标准按钮搬进本视图,并让**系统自己的布局**成为本视图的坐标系。
+    ///
+    /// ⚠️ **不要再直接写按钮的 frame。** 这三个是 AppKit 的托管视图:只要 theme frame 走一次
+    /// 布局(改窗口尺寸、styleMask 抖动、换屏/换缩放……),AppKit 就会把它们的 frame 重新写成
+    /// **原生数值**(实测 (7,6)/(27,6)/(47,6),14×16),只不过此时是在**本视图的坐标系里**解释。
+    /// 而这条路上我们自己的 `layout()` 不会被调用 —— 本视图尺寸没变,AppKit 不会把它标脏 ——
+    /// 于是按钮就永久停在原生位置上:纵向被顶高 `原生 y + 高/2 − 16/2`(实机截图里正好高 6pt),
+    /// 横向间距变成原生 20 而不是"帧宽 14 + 8 = 22"(22 还会让第三个按钮越过 56pt 的槽被裁掉)。
+    /// 这就是"红绿灯错位"的成因,而且它会随窗口事件反复出现。
+    ///
+    /// 所以这里**一个 frame 都不写**:只搬父视图,再平移本视图的 `bounds.origin`,让 AppKit
+    /// 写回的原生 frame 正好落在我们要的位置。之后 AppKit 无论重排多少次,写回的都是同一批
+    /// **绝对值**(实测与本视图的 bounds 无关,连做三轮重排值不变),对我们等于空操作。
     func embedButtons() {
         guard let window else { return }
         cachedWindow = window
@@ -291,7 +303,6 @@ final class NativeTrafficLightsView: NSView {
             releaseButtons()
             return
         }
-        var x: CGFloat = 0
         for type in Self.buttonTypes {
             guard let button = window.standardWindowButton(type) else { continue }
             if button.superview !== self {
@@ -301,12 +312,26 @@ final class NativeTrafficLightsView: NSView {
                 addSubview(button)
             }
             button.isHidden = false
-            let size = button.frame.size.width > 1 ? button.frame.size : NSSize(width: 14, height: 16)
-            let y = ((bounds.height - size.height) / 2).rounded(.toNearestOrAwayFromZero)
-            button.setFrameOrigin(NSPoint(x: x, y: max(0, y)))
-            x += size.width + Self.buttonSpacing
         }
+        alignToNativeLayout()
         applyGroupHover()
+    }
+
+    /// 以第一个按钮的**原生 frame** 为基准平移 `bounds.origin`:
+    /// 横向让按钮组左缘贴住本视图左缘,纵向让按钮中心落在本视图的垂直中线上。
+    ///
+    /// 每次布局都重算 —— 换显示器时原生数值本身会变(标题栏高度不同),必须跟着走。
+    /// 值不变时不写(赋值本身会触发一次重新合成,与 `ChromeView.stripTitlebar` 同一类开销)。
+    private func alignToNativeLayout() {
+        guard let first = window?.standardWindowButton(Self.buttonTypes[0]) else { return }
+        let f = first.frame
+        let wanted = NSRect(
+            x: f.origin.x,
+            y: f.origin.y + f.size.height / 2 - bounds.height / 2,
+            width: bounds.width,
+            height: bounds.height
+        )
+        if bounds != wanted { bounds = wanted }
     }
 
     /// 把接管过来的红绿灯还回标题栏容器,位置交回 AppKit 自己摆。
