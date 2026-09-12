@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 struct MainContentView: View {
 
     @Environment(FolderStore.self) private var store
+    /// 只用于给纯净模式右上角的图标挑"反色描边"(见 `exitGlyphHalo`)
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isPreparingPrint = false
     // 拼版打印:选项弹层 + 解码期间的门禁(与 isPreparingPrint 分开,
     // 因为它还要在弹层里禁按钮)
@@ -123,34 +125,9 @@ struct MainContentView: View {
         }
         .overlay(alignment: .topTrailing) {
             if store.isImmersive {
-                Button {
-                    store.toggleImmersive()
-                } label: {
-                    Image(systemName: "arrow.down.right.and.arrow.up.left")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .frame(width: 28, height: 22)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("退出只看图 (Esc / F)")
-                // 兜底路径:悬停按钮本体(28×22)也恢复满不透明。
-                // 之所以还要这一条:角上那块 120×64 热区靠 `mouseMoved` 事件驱动,
-                // 而全项目没有一处开过 `acceptsMouseMovedEvents`,浏览态画布也没装
-                // 带 .mouseMoved 的 tracking area —— 万一事件根本不生成,按钮就永远停在幽灵态。
-                // 这一条挂在 `.padding(12)` **之前**,命中区就是按钮本体,不会在窗口角上留死区。
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active: showExitAffordance()
-                    case .ended: showExitAffordance(fadeAfter: 2.5)
-                    }
-                }
-                .padding(12)
-                // 幽灵态:留一块极淡的底,看得出"这儿有个东西",又不构成画面里的一个方块。
-                // 不降到 0 是因为那样等于纯隐藏,鼠标不来就没人知道它存在。
-                .opacity(exitAffordanceVisible ? 1 : Self.exitGhostOpacity)
-                .onAppear { showExitAffordance(fadeAfter: 3) }
+                exitAffordance
+                    .padding(12)
+                    .onAppear { showExitAffordance(fadeAfter: 3) }
             }
         }
         .onExitCommand {
@@ -261,9 +238,51 @@ struct MainContentView: View {
 
     // MARK: 纯净模式的退出按钮显隐(甲+丙)
 
-    /// 幽灵态不透明度。留在 0 以上是有意的:纯隐藏等于"鼠标不来就没人知道它存在",
+    /// 静止态图标的不透明度。留在 0 以上是有意的:纯隐藏等于"鼠标不来就没人知道它存在",
     /// 而这里要的是"静止时不打扰,想找时看得见"。
-    private static let exitGhostOpacity: Double = 0.32
+    private static let exitGhostIconOpacity: Double = 0.45
+
+    /// 静止态图标直接压在图片上、没有底材托着,所以补一层**与图标反色**的描边:
+    /// 深色外观(白图标)配黑晕 → 浅色图片上也认得出;浅色外观(深图标)配白晕 → 深色图片上也认得出。
+    private var exitGlyphHalo: Color {
+        colorScheme == .dark ? Color.black.opacity(0.45) : Color.white.opacity(0.85)
+    }
+
+    /// 纯净模式右上角的出口。**静止时不画"按钮",只留一个单薄的图标**;
+    /// 鼠标靠近(角上 120×64 热区,或直接悬停图标本体)时底材淡入、图标回满不透明。
+    /// 这样静止时画面里没有方块、只有一个小图标,但出口始终"看得见、找得到"。
+    private var exitAffordance: some View {
+        Button {
+            store.toggleImmersive()
+        } label: {
+            Image(systemName: "arrow.down.right.and.arrow.up.left")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary)
+                .shadow(color: exitGlyphHalo, radius: 2, y: 0.5)
+                .frame(width: 28, height: 22)
+                // "按钮"这块底只在现身时存在:静止态它是 0,所以画面里只有一个图标、没有方块。
+                .background {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(.regularMaterial)
+                        .opacity(exitAffordanceVisible ? 1 : 0)
+                }
+                .opacity(exitAffordanceVisible ? 1 : Self.exitGhostIconOpacity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("退出只看图 (Esc / F)")
+        // 兜底路径:悬停按钮本体(28×22)也恢复满不透明。
+        // 之所以还要这一条:角上那块 120×64 热区靠 `mouseMoved` 事件驱动,
+        // 而全项目没有一处开过 `acceptsMouseMovedEvents`,浏览态画布也没装
+        // 带 .mouseMoved 的 tracking area —— 万一事件根本不生成,按钮就永远停在幽灵态。
+        // 这一条挂在 `.padding(12)` **之前**,命中区就是按钮本体,不会在窗口角上留死区。
+        .onContinuousHover { phase in
+            switch phase {
+            case .active: showExitAffordance()
+            case .ended: showExitAffordance(fadeAfter: 2.5)
+            }
+        }
+    }
 
     /// 让退出按钮回到满不透明。`fadeAfter` 秒后自动淡回幽灵态;传 nil = 保持满不透明
     /// (鼠标还在热区/按钮上)。generation 递增即作废上一个待执行的淡出。
