@@ -216,11 +216,17 @@ final class NativeTrafficLightsView: NSView {
         DispatchQueue.main.async { [weak self] in self?.embedButtons() }
     }
 
-    /// 视图被从窗口上摘掉之前(例如全屏时 SwiftUI 不再渲染这一格),先把红绿灯交还标题栏。
-    /// 漏了这一步,按钮会跟着这个 view 一起从窗口里消失 —— 全屏时就一个红绿灯都没有了。
+    /// 视图被从窗口上摘掉之前,若正处于全屏就把红绿灯交还系统标题栏。
+    ///
+    /// **只在全屏时交还**。顶栏消失还有另一条常见路径 —— 进纯净模式(只看图)时整个
+    /// `PureHeader` 被换掉 —— 那条路径**绝不能**交还:纯净模式下标题栏容器是"隐藏 + 0 高"的,
+    /// 把按钮塞回去之后 AppKit 在随后的布局里会把容器高度还原,按钮就直接露在画面左上角了。
+    /// 不交还时按钮随本视图一起离开层级、不会被绘制,退出纯净模式时新视图再把它们接管回来。
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
-        if newWindow == nil { releaseButtons() }
+        guard newWindow == nil else { return }
+        guard let window = window ?? cachedWindow, window.styleMask.contains(.fullScreen) else { return }
+        releaseButtons()
     }
 
     override func layout() {
@@ -280,14 +286,21 @@ final class NativeTrafficLightsView: NSView {
     }
 
     /// 把接管过来的红绿灯还回标题栏容器,位置交回 AppKit 自己摆。
+    ///
+    /// **只有全屏才该交还**(那条自动隐藏的栏要显示应用名 + 红绿灯)。这里是唯一的交还出口,
+    /// 所以把判断放在这里:非全屏一律不动手,免得把按钮摆进一个"隐藏 + 0 高"的标题栏里 ——
+    /// AppKit 之后一旦还原容器高度,按钮就会赤条条地出现在画面左上角。
     private func releaseButtons() {
         guard let window = window ?? cachedWindow else { return }
+        guard window.styleMask.contains(.fullScreen) else { return }
         guard Self.buttonTypes.contains(where: { window.standardWindowButton($0)?.superview === self }) else { return }
         let host = originalContainer ?? Self.findTitlebar(in: window)
         for type in Self.buttonTypes {
             guard let button = window.standardWindowButton(type), button.superview === self else { continue }
             button.removeFromSuperview()
-            button.isHidden = false
+            // 刻意**不动** `isHidden`:按钮显隐的唯一归属是 ChromeView.stripTitlebar()
+            // (它按 immersive 决定)。这里顺手点亮的话,纯净模式(标题栏容器只是被隐藏、
+            // 高度可能被 AppKit 还原)下按钮就会露出来。
             host?.addSubview(button)
         }
         // 交还后立刻催一次布局:光标 needsLayout 要等下一轮 run loop,
