@@ -1093,10 +1093,17 @@ private final class ChromeView: NSView {
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
+    /// 窗口 chrome 的唯一落点。**每次 SwiftUI 重渲染都会跑到这里**(经 `WindowChrome.updateNSView`),
+    /// 所以下面**每一处赋值都只在值真的会变时才写** —— 无条件写 `title` / 标题栏容器的
+    /// `frame.size.height` / 图层遮罩,每次都会强制 theme frame 重新布局与重新合成,
+    /// 在 1x(1080p)面板上会被看成画面轻微闪动。
+    /// (同一类问题 P1-3 在画布那边已经修过:`updateNSView` 不再无条件重绘整块画布。)
     private func stripTitlebar() {
         WindowMoveControl.setBackgroundMove(allowBackgroundMove)
         guard let window else { return }
-        window.styleMask.insert(.fullSizeContentView)
+        if !window.styleMask.contains(.fullSizeContentView) {
+            window.styleMask.insert(.fullSizeContentView)
+        }
         // 记住窗口位置与尺寸,下次启动恢复到上次的位置
         if window.frameAutosaveName.isEmpty {
             window.setFrameAutosaveName("MainWindow")
@@ -1108,28 +1115,29 @@ private final class ChromeView: NSView {
         // 纯净模式要的是"只剩一张图",就算全屏了也不该冒出系统那条栏
         let showSystemTitlebar = fullScreen && !immersive
         // 全屏那条栏本身要看得见,所以别让它透明;平时仍然透明(应用顶栏自己画背景)
-        window.titlebarAppearsTransparent = !showSystemTitlebar
-        window.titleVisibility = showSystemTitlebar ? .visible : .hidden
+        if window.titlebarAppearsTransparent != !showSystemTitlebar {
+            window.titlebarAppearsTransparent = !showSystemTitlebar
+        }
+        let visibility: NSWindow.TitleVisibility = showSystemTitlebar ? .visible : .hidden
+        if window.titleVisibility != visibility { window.titleVisibility = visibility }
         // 用 Info.plist 的 CFBundleName,别在这里再硬写一遍应用名(改一次要记得改两处)
-        window.title = showSystemTitlebar ? Self.appName : ""
-        window.backgroundColor = .clear
-        window.isOpaque = false
+        let title = showSystemTitlebar ? Self.appName : ""
+        if window.title != title { window.title = title }
+        if window.backgroundColor != .clear { window.backgroundColor = .clear }
+        if window.isOpaque { window.isOpaque = false }
         // 全屏时没有窗口圆角可谈,留着会把内容四角切出圆角
         let radius: CGFloat = (immersive || fullScreen) ? 0 : 10
-        window.contentView?.wantsLayer = true
-        window.contentView?.layer?.cornerRadius = radius
-        window.contentView?.layer?.masksToBounds = true
-        window.contentView?.superview?.wantsLayer = true
-        window.contentView?.superview?.layer?.cornerRadius = radius
-        window.contentView?.superview?.layer?.masksToBounds = true
+        applyChrome(to: window.contentView, radius: radius)
+        applyChrome(to: window.contentView?.superview, radius: radius)
         // 原生标题栏藏掉,避免挡自定义顶栏点击;红绿灯由 PureHeader 里的 NativeTrafficLights 接管。
         // 纯净模式连按钮一起藏。**全屏时反过来**:标题栏露出来,红绿灯也留回那儿。
         for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(b)?.isHidden = immersive
+            guard let button = window.standardWindowButton(b) else { continue }
+            if button.isHidden != immersive { button.isHidden = immersive }
         }
         for view in titlebarViews(in: window) {
             if showSystemTitlebar {
-                view.isHidden = false
+                if view.isHidden { view.isHidden = false }
                 // 之前被压成 0 高,这里要还原,否则那条栏是一条零高度的缝
                 if titlebarOriginalHeight > 1, view.frame.size.height < 1 {
                     view.frame.size.height = titlebarOriginalHeight
@@ -1138,10 +1146,21 @@ private final class ChromeView: NSView {
                 if titlebarOriginalHeight < 1, view.frame.size.height > 1 {
                     titlebarOriginalHeight = view.frame.size.height
                 }
-                view.isHidden = true
-                view.frame.size.height = 0
+                if !view.isHidden { view.isHidden = true }
+                if view.frame.size.height != 0 { view.frame.size.height = 0 }
             }
         }
+    }
+
+    /// 圆角 / 遮罩只在真的需要改时才动 —— 给图层赋值本身就会触发一次重新合成。
+    /// 圆角为 0 时(`immersive` 或全屏)没必要开 `masksToBounds`:既是纯开销,
+    /// 又会把整窗内容拖进离屏通道,在 1x 面板上容易出现合成层面的轻微闪动。
+    private func applyChrome(to view: NSView?, radius: CGFloat) {
+        guard let view else { return }
+        if !view.wantsLayer { view.wantsLayer = true }
+        if view.layer?.cornerRadius != radius { view.layer?.cornerRadius = radius }
+        let shouldMask = radius > 0
+        if view.layer?.masksToBounds != shouldMask { view.layer?.masksToBounds = shouldMask }
     }
 
     /// 标题栏容器:用记住的那些(AppKit 进出全屏时可能把它挪进另一个窗口,
