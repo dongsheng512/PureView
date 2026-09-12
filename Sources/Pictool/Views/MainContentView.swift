@@ -1055,18 +1055,32 @@ private final class ChromeView: NSView {
 
     /// 进出全屏要重跑一遍:全屏下标题栏是"还给系统"的,与平时正好相反。
     /// 光靠 updateNSView 不行 —— SwiftUI 不会因为窗口进了全屏就重算这个视图。
+    /// 会改变"标题栏该不该露出来"的所有窗口事件。
+    /// 进出全屏是主因;**换显示器 / 换缩放同样会重排 theme frame** —— AppKit 会把标题栏容器
+    /// 的高度还原,不重跑一次,原生标题栏就会重新冒出来(红绿灯出现在窗口左上角)。
+    private static let chromeNotifications: [Notification.Name] = [
+        NSWindow.didEnterFullScreenNotification,
+        NSWindow.didExitFullScreenNotification,
+        NSWindow.didChangeScreenNotification,
+        NSWindow.didChangeBackingPropertiesNotification,
+    ]
+
     private func observeWindowState() {
         let center = NotificationCenter.default
-        center.removeObserver(self, name: NSWindow.didEnterFullScreenNotification, object: nil)
-        center.removeObserver(self, name: NSWindow.didExitFullScreenNotification, object: nil)
+        for name in Self.chromeNotifications {
+            center.removeObserver(self, name: name, object: nil)
+        }
         guard let window else { return }
-        center.addObserver(self, selector: #selector(windowStateChanged),
-                           name: NSWindow.didEnterFullScreenNotification, object: window)
-        center.addObserver(self, selector: #selector(windowStateChanged),
-                           name: NSWindow.didExitFullScreenNotification, object: window)
+        for name in Self.chromeNotifications {
+            center.addObserver(self, selector: #selector(windowStateChanged), name: name, object: window)
+        }
     }
 
-    @objc private func windowStateChanged() { stripTitlebar() }
+    @objc private func windowStateChanged() {
+        stripTitlebar()
+        // 换屏那次重排往往紧跟在通知之后,同步这一次会被它覆盖 —— 下一轮 run loop 再补一次
+        DispatchQueue.main.async { [weak self] in self?.stripTitlebar() }
+    }
 
     deinit { NotificationCenter.default.removeObserver(self) }
 

@@ -212,7 +212,31 @@ final class NativeTrafficLightsView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        observeOwnerWindow()
         embedButtons()
+        DispatchQueue.main.async { [weak self] in self?.embedButtons() }
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    /// 换显示器 / 换缩放时,AppKit 会重排 theme frame(标题栏容器的高度可能被还原,
+    /// 标准按钮甚至会被塞回标题栏)。这条路上我们收不到任何"SwiftUI 该重新布局"的信号 ——
+    /// 窗口尺寸没变,`layout()` 就不会触发 —— 于是红绿灯要么跑回原生位置、要么整个不见。
+    /// 所以自己盯住窗口的换屏 / 换缩放通知,收到就把按钮重新接管回来。
+    private func observeOwnerWindow() {
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
+        center.removeObserver(self, name: NSWindow.didChangeBackingPropertiesNotification, object: nil)
+        guard let window else { return }
+        center.addObserver(self, selector: #selector(ownerWindowGeometryChanged),
+                           name: NSWindow.didChangeScreenNotification, object: window)
+        center.addObserver(self, selector: #selector(ownerWindowGeometryChanged),
+                           name: NSWindow.didChangeBackingPropertiesNotification, object: window)
+    }
+
+    @objc private func ownerWindowGeometryChanged() {
+        embedButtons()
+        // 同步这一次常被 AppKit 随后的重排盖掉,下一轮 run loop 再补一遍
         DispatchQueue.main.async { [weak self] in self?.embedButtons() }
     }
 
