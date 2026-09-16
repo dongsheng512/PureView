@@ -129,8 +129,9 @@ struct SidebarMaterial: NSViewRepresentable {
     }
 
     private func applyAppearance(to view: NSVisualEffectView) {
-        // 磨砂材质的明暗由外观决定;深色界面档位强制深色外观,得到深色磨砂
-        view.appearance = NSAppearance(named: dark ? .vibrantDark : .aqua)
+        // 外观没变就别写,避免每次 updateNSView 都让磨砂失效。
+        let wanted = NSAppearance(named: dark ? .vibrantDark : .aqua)
+        if view.appearance != wanted { view.appearance = wanted }
     }
 }
 

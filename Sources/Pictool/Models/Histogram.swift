@@ -22,19 +22,45 @@ struct Histogram: Equatable {
 
     var isEmpty: Bool { sampleCount == 0 }
 
-    /// 三通道中最高的单桶计数。用于纵向归一化 —— 取单通道峰值而不是总和,
-    /// 否则纯色图的尖峰会把另外两个通道压成一条平线。
+    /// 三通道排除死黑(0)/死白(255)后的最高单桶。纯黑/纯白图退回含两端的绝对峰值。
     var peak: Int {
-        max(red.max() ?? 0, max(green.max() ?? 0, blue.max() ?? 0))
+        let interior = max(interiorMax(red), interiorMax(green), interiorMax(blue))
+        if interior > 0 { return interior }
+        return max(red.max() ?? 0, green.max() ?? 0, blue.max() ?? 0)
     }
 
-    /// 把某个通道换算成 0...1 的高度序列。空图或长度不对时给全零,不返回 NaN。
+    /// 占用内桶少于此值时 `displayPeak` 退回 `peak`(纯色/海报百分位不稳定)。
+    static let displayPeakOccupiedMinimum = 16
+
+    /// 绘图峰值:占用内桶 ≥ `displayPeakOccupiedMinimum` 时取 96 分位,否则退回 `peak`。
+    var displayPeak: Int {
+        var occupied: [Int] = []
+        occupied.reserveCapacity((Self.binCount - 2) * 3)
+        for channel in [red, green, blue] {
+            guard channel.count == Self.binCount else { continue }
+            for value in channel[1..<(Self.binCount - 1)] where value > 0 {
+                occupied.append(value)
+            }
+        }
+        guard occupied.count >= Self.displayPeakOccupiedMinimum else { return peak }
+        occupied.sort()
+        let index = (occupied.count - 1) * 96 / 100
+        return max(occupied[index], 1)
+    }
+
+    /// 把某个通道换算成 0...1 的高度序列,按 `displayPeak` 缩放,超出的尖峰贴顶。
+    /// 空图或长度不对时给全零,不返回 NaN。
     func normalized(_ counts: [Int]) -> [Double] {
-        let top = peak
+        let top = displayPeak
         guard top > 0, counts.count == Self.binCount else {
             return Array(repeating: 0, count: Self.binCount)
         }
-        return counts.map { Double($0) / Double(top) }
+        return counts.map { min(1.0, Double($0) / Double(top)) }
+    }
+
+    private func interiorMax(_ counts: [Int]) -> Int {
+        guard counts.count == Self.binCount else { return counts.max() ?? 0 }
+        return counts[1..<(Self.binCount - 1)].max() ?? 0
     }
 
     /// 从位图统计。

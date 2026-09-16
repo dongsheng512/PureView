@@ -7,7 +7,9 @@ CONFIG="${1:-release}"
 
 swift build -c "$CONFIG"
 BIN_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
-APP="build/PureView.app"
+# `.noindex` keeps this workspace copy out of Spotlight / Launchpad.
+# The indexed app is /Applications/PureView.app.
+APP="build.noindex/PureView.app"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

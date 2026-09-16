@@ -23,7 +23,9 @@ struct PureHeader: View {
             Spacer()
             rightCluster
         }
-        .padding(.horizontal, 12)
+        // 非全屏贴齐原生红绿灯左边距(约 8pt);全屏无灯,用和右侧一样的 12pt
+        .padding(.leading, isFullScreen ? 12 : 8)
+        .padding(.trailing, 12)
         .environment(\.colorScheme, mainHeaderColorScheme)
         .frame(height: 32)
         .frame(maxWidth: .infinity)
@@ -69,20 +71,22 @@ struct PureHeader: View {
     }
 
     private var leftCluster: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 0) {
             // 全屏时不摆红绿灯:它们在系统那条栏里,这里留空只会多出一截空档
             if !isFullScreen {
                 NativeTrafficLights()
                     .frame(width: NativeTrafficLights.width, height: NativeTrafficLights.height)
             }
+            // 灯组与侧栏按钮分开:系统工具栏大约 16pt,不要和三盏灯挤成一排
             HeaderButton("sidebar.leading", help: "显示/隐藏侧栏 (⌃⌘S)") {
                 store.toggleSidebar()
             }
-            Spacer().frame(width: 8)
+            .padding(.leading, isFullScreen ? 0 : 16)
             Text("PureView")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
+                .padding(.leading, 10)
         }
     }
 

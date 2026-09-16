@@ -153,7 +153,7 @@ struct InfoInspector: View {
 }
 
 /// 直方图绘制:黑底 + 三通道加色混合,重叠处自然变白,和预览/PS 的观感一致。
-/// 纵向按三通道**共同**的峰值归一化,所以各通道的相对高低是可直接比较的。
+/// 纵向按主体分布(96 分位)缩放,均匀色块的针状尖峰贴顶,不把其余通道压扁。
 private struct HistogramChart: View {
 
     let histogram: Histogram

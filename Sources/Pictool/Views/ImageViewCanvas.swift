@@ -133,10 +133,12 @@ struct ImageViewCanvas: NSViewRepresentable {
         init(_ parent: ImageViewCanvas) {
             self.parent = parent
 
+            // 滚动条保持开启(放大后滚轮/触控板平移仍走 clip view),条子本身画成 0 宽以免 fit 取整误出条。
+            scrollView.verticalScroller = HiddenScroller(frame: .zero)
+            scrollView.horizontalScroller = HiddenScroller(frame: .zero)
             scrollView.hasVerticalScroller = true
             scrollView.hasHorizontalScroller = true
             scrollView.autohidesScrollers = true
-            // overlay 不挤占 contentView,避免缩放越过视口时滚动条弹出导致取景跳一下
             scrollView.scrollerStyle = .overlay
             scrollView.automaticallyAdjustsContentInsets = false
             scrollView.contentInsets = NSEdgeInsets()
@@ -406,7 +408,9 @@ struct ImageViewCanvas: NSViewRepresentable {
 
         private func displayMaxPixel() -> CGFloat {
             let size = clipView.bounds.size
-            return max(2048, CGFloat(Int(max(size.width, size.height))) * 2)
+            // 按点数 × backing 请求;窗口未挂时按 2x。
+            let backing = scrollView.window?.backingScaleFactor ?? 2
+            return max(2048, CGFloat(Int(max(size.width, size.height))) * backing)
         }
 
         private func setDisplayImage(_ image: NSImage?, facts: ImageLoader.SourceFacts, url: URL) {
@@ -983,10 +987,24 @@ struct ImageViewCanvas: NSViewRepresentable {
 
 // MARK: - AppKit 子类
 
+/// 0 宽且不绘制,让 NSScrollView 仍处理滚轮平移,画面上不出条子。
+private final class HiddenScroller: NSScroller {
+    override func draw(_ dirtyRect: NSRect) {}
+    override class var isCompatibleWithOverlayScrollers: Bool { true }
+    override class func scrollerWidth(for controlSize: NSControl.ControlSize,
+                                      scrollerStyle: NSScroller.Style) -> CGFloat { 0 }
+}
+
 /// 捏合手势自己处理,避免 NSScrollView.magnification 在松手时再兑换一次 frame。
 final class CanvasScrollView: NSScrollView {
     var onMagnifyDelta: ((CGFloat, CGPoint) -> Void)?
     var onSmartZoom: (() -> Void)?
+
+    override func tile() {
+        super.tile()
+        verticalScroller?.alphaValue = 0
+        horizontalScroller?.alphaValue = 0
+    }
 
     override func magnify(with event: NSEvent) {
         let loc = contentView.convert(event.locationInWindow, from: nil)

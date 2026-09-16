@@ -1,10 +1,12 @@
 # Xcode / SwiftPM
 .build/
 .build/*
-# 打包产物入库:build/PureView.app 作为发布包随仓库分发
+# 打包产物入库:build.noindex/PureView.app 作为发布包随仓库分发
+# `.noindex` 后缀让 Spotlight / 启动台忽略这份工作副本，避免和应用目录里的安装包重复。
 build/*
-!build/PureView.app
 !build/.gitignore
+build.noindex/*
+!build.noindex/PureView.app
 *.xcodeproj
 xcuserdata/
 .swiftpm/
@@ -17,19 +19,10 @@ xcuserdata/
 .mimosa/
 .workbuddy/
 
-# 本地工作文档:只留本地,不随仓库分发、不推 GitHub
-# (约束/计划/审查/分析类。新增这类文档时往下加一行。README.md 不属此类)
+# 本地工作文档:只留本地,不随仓库分发、不推 GitHub。
+# (约束/计划/审查/分析类,统一放 docs/,新文档放进去即自动忽略。README.md 不属此类)
 AGENTS.md
-NEXT_PLAN.md
-PLAN.md
-MARKUP_PLAN.md
-EDIT_UX_PLAN.md
-CODE_REVIEW.md
-FIX_PLAN.md
-FEATURE_ANALYSIS.md
-ROADMAP.md
-B5_TOOLBAR_DESIGN.md
-B5_POPOVER_PLAN.md
+docs/
 
 # Editor
 .vscode/

@@ -55,7 +55,7 @@ macOS 原生图片查看器 · Swift 6 + SwiftUI(混合 AppKit) · 零第三方�
 
 ```bash
 ./build.sh            # release 构建 + 组装 PureView.app（ad-hoc 签名）
-open build/PureView.app
+open build.noindex/PureView.app
 
 swift build           # debug 构建
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test   # 单元测试

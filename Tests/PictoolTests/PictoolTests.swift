@@ -2526,8 +2526,100 @@ final class HistogramTests: XCTestCase {
         histogram.sampleCount = 150
 
         XCTAssertEqual(histogram.peak, 100)
+        XCTAssertEqual(histogram.displayPeak, 100)
         XCTAssertEqual(histogram.normalized(histogram.red)[10], 1.0, accuracy: 1e-9)
         XCTAssertEqual(histogram.normalized(histogram.green)[20], 0.5, accuracy: 1e-9)
+    }
+
+    /// 黑边堆在 bin 0 的尖峰不能把中间分布压扁;尖峰自己贴顶裁掉。
+    func testEndpointSpikeDoesNotFlattenTheBody() {
+        var histogram = Histogram.empty
+        histogram.red = Array(repeating: 0, count: Histogram.binCount)
+        histogram.green = Array(repeating: 0, count: Histogram.binCount)
+        histogram.blue = Array(repeating: 0, count: Histogram.binCount)
+        histogram.red[0] = 10_000
+        histogram.red[128] = 100
+        histogram.green[128] = 80
+        histogram.sampleCount = 10_180
+
+        XCTAssertEqual(histogram.peak, 100)
+        XCTAssertEqual(histogram.displayPeak, 100)
+        XCTAssertEqual(histogram.normalized(histogram.red)[128], 1.0, accuracy: 1e-9)
+        XCTAssertEqual(histogram.normalized(histogram.red)[0], 1.0, accuracy: 1e-9)
+        XCTAssertEqual(histogram.normalized(histogram.green)[128], 0.8, accuracy: 1e-9)
+    }
+
+    /// 纯黑图质量全在 bin 0,峰值必须退回两端,否则归一化除零、画面全空。
+    func testPureBlackUsesEndpointPeak() {
+        var histogram = Histogram.empty
+        histogram.red = Array(repeating: 0, count: Histogram.binCount)
+        histogram.green = Array(repeating: 0, count: Histogram.binCount)
+        histogram.blue = Array(repeating: 0, count: Histogram.binCount)
+        histogram.red[0] = 50
+        histogram.green[0] = 50
+        histogram.blue[0] = 50
+        histogram.sampleCount = 50
+
+        XCTAssertEqual(histogram.peak, 50)
+        XCTAssertEqual(histogram.displayPeak, 50)
+        XCTAssertEqual(histogram.normalized(histogram.red)[0], 1.0, accuracy: 1e-9)
+    }
+
+    /// 纯白图质量全在 bin 255,与纯黑一样退回两端峰值。
+    func testPureWhiteUsesEndpointPeak() {
+        var histogram = Histogram.empty
+        histogram.red = Array(repeating: 0, count: Histogram.binCount)
+        histogram.green = Array(repeating: 0, count: Histogram.binCount)
+        histogram.blue = Array(repeating: 0, count: Histogram.binCount)
+        histogram.red[255] = 50
+        histogram.green[255] = 50
+        histogram.blue[255] = 50
+        histogram.sampleCount = 50
+
+        XCTAssertEqual(histogram.peak, 50)
+        XCTAssertEqual(histogram.displayPeak, 50)
+        XCTAssertEqual(histogram.normalized(histogram.red)[255], 1.0, accuracy: 1e-9)
+    }
+
+    /// 占用桶足够多时,一两根远高于主体的针不能把分布压扁。
+    func testDisplayScaleIgnoresAFewTallSpikes() {
+        var histogram = Histogram.empty
+        histogram.red = Array(repeating: 0, count: Histogram.binCount)
+        histogram.green = Array(repeating: 0, count: Histogram.binCount)
+        histogram.blue = Array(repeating: 0, count: Histogram.binCount)
+        for index in 20..<60 { histogram.red[index] = 100 }
+        histogram.green[200] = 8_000
+        histogram.sampleCount = 4_000 + 8_000
+
+        XCTAssertEqual(histogram.peak, 8_000)
+        XCTAssertEqual(histogram.displayPeak, 100)
+        XCTAssertEqual(histogram.normalized(histogram.red)[20], 1.0, accuracy: 1e-9)
+        XCTAssertEqual(histogram.normalized(histogram.green)[200], 1.0, accuracy: 1e-9)
+    }
+
+    /// 占用内桶 15 个时退回 `peak`;16 个起用 96 分位,尖峰不再当满格。
+    func testDisplayPeakFloorIsSixteenOccupiedBins() {
+        func histogram(bodyBins: Int, body: Int = 100, spike: Int = 8_000) -> Histogram {
+            var histogram = Histogram.empty
+            histogram.red = Array(repeating: 0, count: Histogram.binCount)
+            histogram.green = Array(repeating: 0, count: Histogram.binCount)
+            histogram.blue = Array(repeating: 0, count: Histogram.binCount)
+            for index in 1...bodyBins { histogram.red[index] = body }
+            histogram.green[200] = spike
+            histogram.sampleCount = bodyBins * body + spike
+            return histogram
+        }
+
+        let below = histogram(bodyBins: Histogram.displayPeakOccupiedMinimum - 2)
+        XCTAssertEqual(below.peak, 8_000)
+        XCTAssertEqual(below.displayPeak, 8_000)
+        XCTAssertEqual(below.normalized(below.red)[1], 100.0 / 8_000.0, accuracy: 1e-9)
+
+        let atFloor = histogram(bodyBins: Histogram.displayPeakOccupiedMinimum - 1)
+        XCTAssertEqual(atFloor.peak, 8_000)
+        XCTAssertEqual(atFloor.displayPeak, 100)
+        XCTAssertEqual(atFloor.normalized(atFloor.red)[1], 1.0, accuracy: 1e-9)
+        XCTAssertEqual(atFloor.normalized(atFloor.green)[200], 1.0, accuracy: 1e-9)
     }
 
     /// 空直方图与长度不对的通道都返回全零序列,不返回 NaN、也不越界。
