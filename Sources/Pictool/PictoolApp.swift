@@ -39,7 +39,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } else if let dir = dirURLs.first {
                 store.openFolder(dir)
             }
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             if let w = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
                 w.makeKeyAndOrderFront(nil)
             }
@@ -177,26 +177,19 @@ struct PictoolApp: App {
                     .keyboardShortcut("r", modifiers: [.command, .option])
                     .disabled(store.currentImage == nil || store.isModalPresented)
                 Divider()
-                // D2 浏览快捷键:动作早就有了(右键菜单 / 顶栏),缺的只是键盘入口。
-                // 一律以 canActOnCurrentImage 门禁 —— 编辑中、模态中全部失效,
-                // 否则会在面板背后改动浏览状态。
-                //
-                // 与排期文档的一处偏离:文档写"无选中标注时才复制图片"(即编辑中也可能复制
-                // 图片),实际做成**编辑中一律不复制图片**。因为 EditView 自己也注册了 ⌘C
-                // (复制选中标注),两个同名快捷键同时有效会退化成"看谁先响应"的不确定行为。
-                // 保守起见编辑态只留 EditView 那一个,代价是"编辑中无选中标注时 ⌘C 不动"。
+                // 编辑中有选中标注时 ⌘C 留给编辑器;没选中才复制图片。两个快捷键不会同时可用。
                 Button("复制图片") { store.copyCurrentImage() }
                     .keyboardShortcut("c", modifiers: .command)
-                    .disabled(!store.canActOnCurrentImage || textInputActive)
+                    .disabled(!store.canCopyCurrentImage || textInputActive)
                 Button("隐藏") { store.hideCurrentImage() }
                     .keyboardShortcut("h", modifiers: [])
-                    .disabled(!store.canActOnCurrentImage || textInputActive)
+                    .disabled(!store.canActOnCurrentImage || store.isTextDraftActive || textInputActive)
                 Button("移到废纸篓…") { store.deleteCurrentImage() }
                     .keyboardShortcut(.delete, modifiers: .command)
-                    .disabled(!store.canActOnCurrentImage || textInputActive)
+                    .disabled(!store.canActOnCurrentImage || store.isTextDraftActive || textInputActive)
                 Button("在 Finder 中显示") { store.revealCurrentInFinder() }
                     .keyboardShortcut("j", modifiers: [.command, .shift])
-                    .disabled(store.currentImage == nil)
+                    .disabled(!store.canActOnCurrentImage || store.isTextDraftActive || textInputActive)
             }
         }
         Settings {

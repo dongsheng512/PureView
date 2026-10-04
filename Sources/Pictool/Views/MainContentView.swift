@@ -37,8 +37,12 @@ struct MainContentView: View {
     @State private var exitAffordanceVisible = false
     @State private var exitAffordanceInZone = false
     @State private var exitFadeGeneration = 0
-    /// 窗口是否处于全屏。全屏时红绿灯交还系统标题栏,应用顶栏让出那一格(见 `PureHeader`)
+    /// 窗口是否处于全屏。全屏时收起自绘顶栏/侧栏/状态栏,图铺满屏幕;
+    /// 红绿灯在系统那条自动隐藏的栏里。
     @State private var isFullScreen = false
+    /// 全屏引发的纯净模式(进全屏自动带入)。用于区分"用户手动按 F 进的纯净":
+    /// 全屏+纯净下按 F/Esc 是"一把退到底"(连全屏一起退),而不是只退纯净留在全屏里。
+    @State private var fullscreenLinkedImmersive = false
 
     private var sortPreference: ImageSortPreference {
         ImageSortPreference(key: sortKey, direction: sortDirection)
@@ -57,7 +61,9 @@ struct MainContentView: View {
         // 磨砂档:整窗垫一层玻璃。**必须挂在 `WindowChrome` 之后** —— SwiftUI 里后挂的
         // background 在更底层,这样它才垫在整个界面下面。窗口非不透明这一前提由
         // WindowChrome 里的 `stripTitlebar()` 保证,与侧栏的 `SidebarMaterial` 同源。
-        .background(WindowChrome(immersive: store.isImmersive, allowBackgroundMove: !store.isEditing))
+        .background(WindowChrome(immersive: store.isImmersive,
+                                 fullscreenLinkedImmersive: fullscreenLinkedImmersive,
+                                 allowBackgroundMove: !store.isEditing))
         .background {
             if canvasBackground.isTranslucent {
                 GlassBackdrop(canvas: canvasBackground)
@@ -86,6 +92,9 @@ struct MainContentView: View {
             if !immersive {
                 withAnimation(.easeInOut(duration: 0.2)) { slideshowHUDVisible = false }
             }
+            // 全屏里手动退/进纯净后,联动标记必须失效:否则系统标题栏被过期标记
+            // 压住,退全屏时还会把用户手动开启的纯净一起退掉
+            if !immersive, isFullScreen { fullscreenLinkedImmersive = false }
         }
         // 底部控制条只在**幻灯片会话**里存在:会话开始浮现一次,会话结束立刻收起。
         // 不播放时鼠标扫过底边一概不弹 —— 纯净模式就该是一张图。
@@ -97,13 +106,26 @@ struct MainContentView: View {
                 withAnimation(.easeInOut(duration: 0.2)) { slideshowHUDVisible = false }
             }
         }
-        // 全屏 / 退出全屏:告诉 PureHeader 是否要让出红绿灯那一格。
-        // 通知是全局的,按 object 认窗口,免得别的窗口(如打开面板)全屏时误判。
+        // 全屏 ⇄ 纯净模式单向绑定:进全屏自动进纯净(复用 toggleImmersive 的
+        // 侧栏记忆/还原),退全屏自动还原。通知是全局的,按 object 认窗口,
+        // 免得别的窗口(如打开面板)全屏时误判。
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
-            if (note.object as? NSWindow) === NSApp.keyWindow { isFullScreen = true }
+            guard (note.object as? NSWindow) === NSApp.keyWindow else { return }
+            isFullScreen = true
+            if !store.isImmersive {
+                fullscreenLinkedImmersive = true
+                store.toggleImmersive()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
-            if (note.object as? NSWindow) === NSApp.keyWindow { isFullScreen = false }
+            guard (note.object as? NSWindow) === NSApp.keyWindow else { return }
+            isFullScreen = false
+            if fullscreenLinkedImmersive, store.isImmersive {
+                fullscreenLinkedImmersive = false
+                store.toggleImmersive()
+            } else if !store.isImmersive {
+                fullscreenLinkedImmersive = false
+            }
         }
         .onChange(of: wrapNavigation) { _, value in
             store.wrapNavigation = value
@@ -129,8 +151,15 @@ struct MainContentView: View {
                 if isPreparingPrint {
                     ProgressView("正在准备打印…")
                         .padding(14)
-                        // 加深色画布上也要能看清,给进度条一层材质底
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                        // 加深色画布上也要能看清,给进度条一层底材(26 起是系统玻璃)。
+                        // 原来就没有描边与投影,所以这里都不加。
+                        .background {
+                            AdaptiveGlassSurface(
+                                shape: RoundedRectangle(cornerRadius: 10),
+                                legacyStroke: nil,
+                                shadowOpacity: 0
+                            )
+                        }
                 }
             }
         }
@@ -151,7 +180,12 @@ struct MainContentView: View {
             }
         }
         .onExitCommand {
-            if store.isImmersive { store.toggleImmersive() }
+            if store.isImmersive, isFullScreen, fullscreenLinkedImmersive {
+                // 全屏引发的纯净:F/Esc 一把退到底,状态还原由退出全屏的通知链完成
+                exitFullScreen()
+            } else if store.isImmersive {
+                store.toggleImmersive()
+            }
         }
     }
 
@@ -309,7 +343,11 @@ struct MainContentView: View {
     /// 进模式时会先满不透明亮 3 秒再淡掉,那 3 秒是唯一一次"告诉用户出口在这儿"的机会。
     private var exitAffordance: some View {
         Button {
-            store.toggleImmersive()
+            if isFullScreen, fullscreenLinkedImmersive {
+                exitFullScreen()
+            } else {
+                store.toggleImmersive()
+            }
         } label: {
             Image(systemName: "arrow.down.right.and.arrow.up.left")
                 .font(.system(size: 12, weight: .medium))
@@ -341,6 +379,18 @@ struct MainContentView: View {
         }
     }
 
+    /// 全屏 ⇄ 纯净绑定下的"退到底"出口:只退全屏,纯净与侧栏由
+    /// `didExitFullScreen` 通知链还原。找不到窗口(理论不可达)才退纯净兜底。
+    private func exitFullScreen() {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow,
+              window.styleMask.contains(.fullScreen) else {
+            fullscreenLinkedImmersive = false
+            if store.isImmersive { store.toggleImmersive() }
+            return
+        }
+        window.toggleFullScreen(nil)
+    }
+
     /// 让退出按钮现身。`fadeAfter` 秒后自动淡回透明;传 nil = 保持不透明
     /// (鼠标还在热区/按钮上)。generation 递增即作废上一个待执行的淡出。
     private func showExitAffordance(fadeAfter seconds: Double? = nil) {
@@ -362,22 +412,10 @@ struct MainContentView: View {
     private var normalLayer: some View {
         ZStack(alignment: .top) {
             HStack(spacing: 0) {
-                if store.sidebarVisible {
+                if store.sidebarVisible, !isFullScreen {
                     SidebarView()
                         .frame(width: sidebarWidth)
-                        // 1px 分隔线贴在侧栏右边缘(深色画布用白色线,否则不可见)
-                        .overlay(alignment: .trailing) {
-                            Rectangle()
-                                .fill(
-                                    // 分隔线跟随「派生界面明暗」而不是「画布是不是黑的」:
-                                    // 磨砂档没有底色,但它按深色界面渲染,这条线得是白线
-                                    canvasBackground.prefersDarkChrome
-                                        ? Color.white.opacity(isHoveringDivider ? 0.22 : 0.12)
-                                        : Color.black.opacity(isHoveringDivider ? 0.14 : 0.07)
-                                )
-                                .frame(width: 1)
-                        }
-                        // 16pt 拖拽热区，居中于分隔线上（左右各 8pt），便于抓取
+                        // 拖拽热区只贴在侧栏右缘,不铺满,避免挡住列表点击
                         .overlay(alignment: .trailing) {
                             Color.clear
                                 .frame(width: 16)
@@ -389,7 +427,10 @@ struct MainContentView: View {
                                             let next = dragStartWidth + value.translation.width
                                             sidebarWidth = min(400, max(180, next))
                                         }
-                                        .onEnded { _ in dragStartWidth = sidebarWidth; UserDefaults.standard.set(sidebarWidth, forKey: "sidebarWidth") }
+                                        .onEnded { _ in
+                                            dragStartWidth = sidebarWidth
+                                            UserDefaults.standard.set(sidebarWidth, forKey: "sidebarWidth")
+                                        }
                                 )
                                 .onHover { inside in
                                     isHoveringDivider = inside
@@ -406,13 +447,16 @@ struct MainContentView: View {
                         prepareAndPrint()
                     }
             }
-            .padding(.top, 32)
-            // 侧栏收放动画:transition 早已写好(滑入+淡入),此前缺动画通道导致单帧硬切;
-            // 只绑 sidebarVisible,分隔线拖拽宽度的即时性不受影响
-            .animation(.easeInOut(duration: 0.22), value: store.sidebarVisible)
-            PureHeader(sidebarWidth: sidebarWidth, isFullScreen: isFullScreen)
-                .frame(maxWidth: .infinity, alignment: .top)
+            .padding(.top, isFullScreen ? 0 : 32)
+            if !isFullScreen {
+                PureHeader(sidebarWidth: sidebarWidth, isFullScreen: false)
+                    .frame(maxWidth: .infinity, alignment: .top)
+                // 竖缝一直挂着,x 跟侧栏收放走,避免只淡出、头身错开
+                sidebarColumnSplit
+            }
         }
+        // 只绑 sidebarVisible,分隔线拖拽宽度的即时性不受影响
+        .animation(.easeInOut(duration: 0.22), value: store.sidebarVisible)
         .ignoresSafeArea(edges: .top)
         .onDisappear {
             WindowMoveControl.setBackgroundMove(true)
@@ -588,7 +632,7 @@ struct MainContentView: View {
             }
             // 只绑 showInspector,画布随分区宽度连续重排
             .animation(.easeInOut(duration: 0.22), value: store.showInspector)
-            if !store.isImmersive {
+            if !store.isImmersive, !isFullScreen {
                 statusBar
             }
         }
@@ -607,6 +651,18 @@ struct MainContentView: View {
                 .transition(.opacity)
             }
         }
+    }
+
+    /// 侧栏与主区的竖缝:只画线,不接收点击。收起时 x 收到 -1,和顶栏分色同一条曲线。
+    private var sidebarColumnSplit: some View {
+        let seamX = (store.sidebarVisible ? sidebarWidth : 0) - 1
+        return Rectangle()
+            .fill(ChromeTheme.sidebarSplit(canvasBackground, hovering: isHoveringDivider))
+            .frame(width: 1)
+            .frame(maxHeight: .infinity, alignment: .leading)
+            .offset(x: seamX)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .allowsHitTesting(false)
     }
 
     private var welcomeOverlay: some View {
@@ -838,12 +894,14 @@ struct MainContentView: View {
         }
         .padding(6)
         .frame(width: 170, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(.separator)
-        )
-        .shadow(color: .black.opacity(0.18), radius: 10, y: 3)
+        .background {
+            // 26 起跟着系统的玻璃走(自绘的"仿菜单"不能停在旧版磨砂上);几何/圆角不变
+            AdaptiveGlassSurface(
+                shape: RoundedRectangle(cornerRadius: 8),
+                legacyStroke: AnyShapeStyle(.separator),
+                shadowOpacity: 0.18, shadowRadius: 10, shadowY: 3
+            )
+        }
     }
 
     // MARK: 自测模式(--zoom-test):自动执行一组缩放动作并记录日志
@@ -1020,8 +1078,14 @@ private struct SlideshowHUD: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.separator))
+        .background {
+            // 幻灯片 HUD:26 起用系统玻璃(原来就没有投影,所以传 0)
+            AdaptiveGlassSurface(
+                shape: Capsule(),
+                legacyStroke: AnyShapeStyle(.separator),
+                shadowOpacity: 0
+            )
+        }
     }
 
     private func hudButton(_ symbol: String, action: @escaping () -> Void, prominent: Bool = false, disabled: Bool = false) -> some View {
@@ -1041,16 +1105,19 @@ private struct SlideshowHUD: View {
 /// 窗口 chrome：移除原生标题栏，仅保留 PureHeader 单层
 private struct WindowChrome: NSViewRepresentable {
     let immersive: Bool
+    var fullscreenLinkedImmersive = false
     var allowBackgroundMove = true
     func makeNSView(context: Context) -> NSView { ChromeView() }
     func updateNSView(_ nsView: NSView, context: Context) {
         (nsView as? ChromeView)?.immersive = immersive
+        (nsView as? ChromeView)?.fullscreenLinkedImmersive = fullscreenLinkedImmersive
         (nsView as? ChromeView)?.allowBackgroundMove = allowBackgroundMove
         (nsView as? ChromeView)?.apply()
     }
 }
 private final class ChromeView: NSView {
     var immersive = false
+    var fullscreenLinkedImmersive = false
     var allowBackgroundMove = true
     /// 应用名(全屏那条系统栏要显示它)。取自 Info.plist,避免与 `build.sh` 里的
     /// `CFBundleName` 各写一份;取不到时退回 "PureView"。
@@ -1122,8 +1189,10 @@ private final class ChromeView: NSView {
         // 显示"应用名 + 红绿灯"。此前这里一刀切地藏掉标题栏,全屏时那条栏就是空的,
         // 红绿灯只能留在应用自己的顶栏里 —— 看起来就像"全屏了,窗口还是原来那个"。
         let fullScreen = window.styleMask.contains(.fullScreen)
-        // 纯净模式要的是"只剩一张图",就算全屏了也不该冒出系统那条栏
-        let showSystemTitlebar = fullScreen && !immersive
+        // 纯净模式(无论是否全屏)都不要系统那条栏;非纯净的全屏要看得见。
+        // 全屏引发的纯净由 fullscreenLinkedImmersive 标记:进全屏时自动带入,
+        // 此时鼠标扫顶部也没有系统栏 —— 出口统一收敛到右上角热区/Esc。
+        let showSystemTitlebar = fullScreen && !immersive && !fullscreenLinkedImmersive
         // 全屏那条栏本身要看得见,所以别让它透明;平时仍然透明(应用顶栏自己画背景)
         if window.titlebarAppearsTransparent != !showSystemTitlebar {
             window.titlebarAppearsTransparent = !showSystemTitlebar
@@ -1135,15 +1204,16 @@ private final class ChromeView: NSView {
         if window.title != title { window.title = title }
         if window.backgroundColor != .clear { window.backgroundColor = .clear }
         if window.isOpaque { window.isOpaque = false }
-        // 全屏时没有窗口圆角可谈,留着会把内容四角切出圆角
-        let radius: CGFloat = (immersive || fullScreen) ? 0 : 10
+        // 全屏/纯净无圆角;14–15 自己裁 10pt;26+ 交给系统窗口裁,避免和本机半径叠出白边
+        let radius: CGFloat = (immersive || fullScreen) ? 0 : WindowChromeMetrics.cornerRadius
         applyChrome(to: window.contentView, radius: radius)
         applyChrome(to: window.contentView?.superview, radius: radius)
         // 原生标题栏藏掉,避免挡自定义顶栏点击;红绿灯由 PureHeader 里的 NativeTrafficLights 接管。
-        // 纯净模式连按钮一起藏。**全屏时反过来**:标题栏露出来,红绿灯也留回那儿。
+        // 纯净模式连按钮一起藏(全屏引发的纯净也算)。
         for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             guard let button = window.standardWindowButton(b) else { continue }
-            if button.isHidden != immersive { button.isHidden = immersive }
+            let shouldHide = immersive || fullscreenLinkedImmersive
+            if button.isHidden != shouldHide { button.isHidden = shouldHide }
         }
         for view in titlebarViews(in: window) {
             if showSystemTitlebar {
@@ -1169,6 +1239,8 @@ private final class ChromeView: NSView {
         guard let view else { return }
         if !view.wantsLayer { view.wantsLayer = true }
         if view.layer?.cornerRadius != radius { view.layer?.cornerRadius = radius }
+        let curve: CALayerCornerCurve = radius > 0 ? .continuous : .circular
+        if view.layer?.cornerCurve != curve { view.layer?.cornerCurve = curve }
         let shouldMask = radius > 0
         if view.layer?.masksToBounds != shouldMask { view.layer?.masksToBounds = shouldMask }
     }
@@ -1188,4 +1260,3 @@ private final class ChromeView: NSView {
         return titlebarViews
     }
 }
-

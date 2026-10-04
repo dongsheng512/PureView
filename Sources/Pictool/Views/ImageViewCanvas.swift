@@ -178,6 +178,9 @@ struct ImageViewCanvas: NSViewRepresentable {
             clipView.onLayoutChange = { [weak self] in
                 self?.handleLayout()
             }
+            clipView.onDisplayChange = { [weak self] in
+                self?.handleDisplayChange()
+            }
             clipView.onSmartZoom = { [weak self] in
                 guard let self else { return }
                 self.toggleZoom(at: self.visibleCenter())
@@ -509,9 +512,26 @@ struct ImageViewCanvas: NSViewRepresentable {
             fitScale = newFit
             if wasFit {
                 applyFit()
+                // 窗口拉大或进全屏后,原来那张降采样位图会发虚,停稳后再升到够用的像素
+                scheduleEscalateCheck()
             } else if scale < minScale {
                 applyScale(minScale, anchor: visibleCenter())
             }
+        }
+
+        /// 换屏 / 改缩放。适配模式按新视口重铺并升像素;已缩放则保持同一「实际大小」百分比。
+        private func handleDisplayChange() {
+            guard imageView.image != nil, abs(scrollView.magnification - 1) < 0.001 else { return }
+            let backing = scrollView.window?.backingScaleFactor ?? 2
+            if !wasFit, lastBacking > 0, abs(backing - lastBacking) > 0.01, truePixelSize.width > 0 {
+                let kept = imageView.frame.width * lastBacking * scrollView.magnification / truePixelSize.width
+                lastBacking = backing
+                applyEffectiveScale(kept, backing: backing, animated: false)
+            } else {
+                lastBacking = backing
+                if wasFit { applyFit() }
+            }
+            scheduleEscalateCheck()
         }
 
         private func fitScaleValue() -> CGFloat {
@@ -838,6 +858,9 @@ struct ImageViewCanvas: NSViewRepresentable {
             parent.onScaleChange(value)
         }
 
+        /// 上次用来解释「实际大小」的屏幕倍率。换屏时用它把百分比换算到新屏。
+        private var lastBacking: CGFloat = 0
+
         /// 等平滑缩放停稳再升级,避免解码完成时叠在动画尾帧上造成一次位移
         private func scheduleEscalateCheck() {
             escalateWork?.cancel()
@@ -1023,6 +1046,8 @@ final class CanvasClipView: NSClipView {
     var onZoomDelta: ((CGFloat, CGPoint) -> Void)?
     var onStep: ((Int) -> Void)?
     var onLayoutChange: (() -> Void)?
+    /// 窗口换了屏幕或缩放倍率
+    var onDisplayChange: (() -> Void)?
     var onSmartZoom: (() -> Void)?
     /// 横滑切图提交。方向语义全项目统一:+1 = 下一张,-1 = 上一张
     var onHorizontalSwipe: ((Int) -> Void)?
@@ -1164,11 +1189,38 @@ final class CanvasClipView: NSClipView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        observeDisplay()
         guard window != nil else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
             if let responder = window.firstResponder, responder is NSTextView { return }
             window.makeFirstResponder(self)
+        }
+    }
+
+    /// deinit 非隔离,观察者句柄只在这里摘除。
+    nonisolated(unsafe) private var displayObservers: [NSObjectProtocol] = []
+
+    deinit {
+        for observer in displayObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func observeDisplay() {
+        for observer in displayObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        displayObservers.removeAll()
+        guard let window else { return }
+        for name in [NSWindow.didChangeScreenNotification, NSWindow.didChangeBackingPropertiesNotification] {
+            displayObservers.append(
+                NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.onDisplayChange?()
+                    }
+                }
+            )
         }
     }
 }

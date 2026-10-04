@@ -60,6 +60,8 @@ final class FolderStore {
     var isEditing = false
     /// 文字草稿输入中:裸键菜单(C/D 等)让位给文本输入
     var isTextDraftActive = false
+    /// 编辑器里是否选中了标注。没有选中时 ⌘C 复制图片,有选中时留给编辑器复制标注。
+    var editHasSelection = false
     /// 侧栏是否可见。启动默认收起,打开文件夹或点侧栏按钮后再展开。
     var sidebarVisible = false
     private var sidebarBeforeImmersive = false
@@ -887,6 +889,7 @@ final class FolderStore {
         isEditing = false
         isModalPresented = false
         isTextDraftActive = false
+        editHasSelection = false
         if folderWatchPending {
             folderWatchPending = false
             refreshCurrentFolder()
@@ -911,6 +914,13 @@ final class FolderStore {
     /// 菜单门禁:有当前图,且不在模态/编辑态。
     var canActOnCurrentImage: Bool {
         currentImage != nil && !isModalPresented
+    }
+
+    /// ⌘C 复制图片:浏览态可用;编辑中只有没选中标注、且不在打字时才可用。
+    var canCopyCurrentImage: Bool {
+        guard currentImage != nil, !isTextDraftActive else { return false }
+        if isEditing { return !editHasSelection }
+        return !isModalPresented
     }
 
     func copyCurrentImage() {

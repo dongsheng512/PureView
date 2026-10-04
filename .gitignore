@@ -4,6 +4,8 @@
 # 打包产物入库:build.noindex/PureView.app 作为发布包随仓库分发
 # `.noindex` 后缀让 Spotlight / 启动台忽略这份工作副本，避免和应用目录里的安装包重复。
 build/*
+!build/PureView.app
+!build/PureView.app/**
 !build/.gitignore
 build.noindex/*
 !build.noindex/PureView.app

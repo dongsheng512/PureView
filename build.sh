@@ -5,8 +5,19 @@ cd "$(dirname "$0")"
 
 CONFIG="${1:-release}"
 
-swift build -c "$CONFIG"
-BIN_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
+# SwiftPM 把 LC_BUILD_VERSION 的 sdk 写成最低系统 14.0,AppKit 会据此退回旧红绿灯。
+# 这里把 sdk 抬到本机 SDK,minos 仍是 14.0。
+DEPLOY_TARGET="14.0"
+SDK_VERSION="$(xcrun --show-sdk-version 2>/dev/null || echo 27.0)"
+LINK_PLATFORM_VERSION=(
+    -Xlinker -platform_version
+    -Xlinker macos
+    -Xlinker "$DEPLOY_TARGET"
+    -Xlinker "$SDK_VERSION"
+)
+
+swift build -c "$CONFIG" "${LINK_PLATFORM_VERSION[@]}"
+BIN_DIR="$(swift build -c "$CONFIG" "${LINK_PLATFORM_VERSION[@]}" --show-bin-path)"
 # `.noindex` keeps this workspace copy out of Spotlight / Launchpad.
 # The indexed app is /Applications/PureView.app.
 APP="build.noindex/PureView.app"
@@ -69,6 +80,15 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+
+# 旧路径兼容:有的启动项仍指向 build/PureView.app。
+# ln -sfn 不会替换已存在的真实目录,只会在里面再链一个错的包。
+mkdir -p build
+legacy="build/PureView.app"
+if [ -e "$legacy" ] && [ ! -L "$legacy" ]; then
+    /bin/rm -rf "$legacy"
+fi
+ln -sfn "../build.noindex/PureView.app" "$legacy"
 
 echo "✅ 已构建 $APP"
 echo "   运行: open $APP"

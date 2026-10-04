@@ -1918,6 +1918,29 @@ final class AnnotationStoreTests: XCTestCase {
         XCTAssertEqual(store.annotations(for: URL(fileURLWithPath: "/tmp/foo.jpg/")).count, 1)
     }
 
+    func testSessionKeepsCropWhenAnnotationsCleared() {
+        let store = AnnotationStore()
+        let url = URL(fileURLWithPath: "/tmp/crop.jpg")
+        var session = EditSession()
+        session.selection = CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.4)
+        session.quarterTurns = 1
+        session.flipH = true
+        store.setSession(session, for: url)
+
+        XCTAssertTrue(store.hasSession(for: url))
+        XCTAssertTrue(store.annotations(for: url).isEmpty)
+        store.set([], for: url)
+        let kept = store.session(for: url)
+        XCTAssertEqual(kept.selection, session.selection)
+        XCTAssertEqual(kept.quarterTurns, 1)
+        XCTAssertTrue(kept.flipH)
+
+        var pristine = EditSession()
+        pristine.quarterTurns = 4
+        store.setSession(pristine, for: url)
+        XCTAssertFalse(store.hasSession(for: url))
+    }
+
     func testClipboardHoldsCopyUntilReplaced() {
         let store = AnnotationStore()
         XCTAssertNil(store.clipboard)

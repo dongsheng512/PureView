@@ -31,11 +31,20 @@ struct CropCanvas: View {
     var outputSize: CGSize = .zero
     /// 右键菜单(容器坐标进出);nil 表示无
     var contextMenuProvider: ((CGPoint) -> NSMenu?)?
+    /// 点在标注上时选中,不拖裁切框。返回归一化坐标下的命中。
+    var annotationHitTest: ((CGPoint) -> UUID?)?
+    var annotations: [Annotation] = []
+    var selectedAnnotationID: UUID?
+    var onSelectAnnotation: ((UUID?) -> Void)?
+    /// 双击文字:切回文字工具并进入编辑
+    var onEditText: ((UUID) -> Void)?
 
     @State private var dragBaseline: CGRect?
     @State private var dragStartPoint: CGPoint?
     @State private var undoGroupOpen = false
     @State private var activeHandle: CropHandle = .move
+    /// 这次按下命中了标注,拖动不改裁切框
+    @State private var holdingAnnotation = false
 
     var body: some View {
         GeometryReader { geo in
@@ -103,10 +112,26 @@ struct CropCanvas: View {
 
                 // 显式给尺寸:NSViewRepresentable 没有 intrinsicContentSize,
                 // 不钉住就只有被命中的那一小块能拖,其余区域照样漏给窗口。
+                if let box = annotationBox(fit: fit) {
+                    ZStack {
+                        Rectangle()
+                            .strokeBorder(Color.white.opacity(0.85), lineWidth: 2.2)
+                        Rectangle()
+                            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    }
+                    .frame(width: box.width, height: box.height)
+                    .position(x: box.midX, y: box.midY)
+                    .allowsHitTesting(false)
+                }
+
                 CanvasMouseCatcher(
-                    onDown: { point in handleDown(point, fit: fit, minNorm: minNorm) },
+                    onDown: { point, clicks in handleDown(point, fit: fit, minNorm: minNorm, clickCount: clicks) },
                     onDrag: { point in handleDrag(point, fit: fit, minNorm: minNorm) },
                     onUp: handleUp,
+                    hoverHitTest: { screen in
+                        guard fit.contains(screen) else { return false }
+                        return annotationHitTest?(normalized(screen, fit)) != nil
+                    },
                     contextMenuProvider: contextMenuProvider
                 )
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -116,14 +141,28 @@ struct CropCanvas: View {
     }
 
     /// AppKit 坐标(isFlipped,左上原点)与 SwiftUI 绘制共用同一套 fit。
-    private func handleDown(_ point: CGPoint, fit: CGRect, minNorm: CGFloat) {
+    private func handleDown(_ point: CGPoint, fit: CGRect, minNorm: CGFloat, clickCount: Int) {
         dragStartPoint = point
+        holdingAnnotation = false
+        let handle = hitHandle(at: point, fit: fit)
+        let onKnob = handle != .move
+        if !onKnob, fit.contains(point), let id = annotationHitTest?(normalized(point, fit)) {
+            holdingAnnotation = true
+            onSelectAnnotation?(id)
+            if clickCount >= 2,
+               case .text = annotations.first(where: { $0.id == id })?.kind {
+                onEditText?(id)
+            }
+            return
+        }
+        onSelectAnnotation?(nil)
         dragBaseline = selection
-        activeHandle = hitHandle(at: point, fit: fit)
+        activeHandle = handle
         // 压栈推迟到首次真正拖动:空点不产生"假撤销"
     }
 
     private func handleDrag(_ point: CGPoint, fit: CGRect, minNorm: CGFloat) {
+        guard !holdingAnnotation else { return }
         guard let base = dragBaseline, let start = dragStartPoint else { return }
         if !undoGroupOpen {
             undoGroupOpen = true
@@ -138,7 +177,45 @@ struct CropCanvas: View {
         dragBaseline = nil
         dragStartPoint = nil
         undoGroupOpen = false
+        holdingAnnotation = false
         activeHandle = .move
+    }
+
+    private func normalized(_ point: CGPoint, _ fit: CGRect) -> CGPoint {
+        CGPoint(x: (point.x - fit.minX) / max(fit.width, 1),
+                y: (point.y - fit.minY) / max(fit.height, 1))
+    }
+
+    private func annotationBox(fit: CGRect) -> CGRect? {
+        guard let id = selectedAnnotationID,
+              let annotation = annotations.first(where: { $0.id == id }) else { return nil }
+        let imageSize = image.size
+        let normalizedBounds: CGRect?
+        switch annotation.kind {
+        case let .text(anchor, content, sizeFraction, _):
+            normalizedBounds = MarkupGeometry.textHitRect(
+                anchor: anchor, content: content, sizeFraction: sizeFraction, imageSize: imageSize
+            )
+        case let .stroke(points, widthLevel, _, style):
+            normalizedBounds = MarkupGeometry.strokeBounds(
+                points, widthFraction: MarkPalette.fraction(MarkPalette.widthTable(for: style), level: widthLevel)
+            )
+        case let .mosaic(points, widthLevel, _):
+            normalizedBounds = MarkupGeometry.strokeBounds(
+                points, widthFraction: MarkPalette.fraction(MarkPalette.mosaicWidths, level: widthLevel)
+            )
+        case let .shape(kind, from, to, widthLevel, _):
+            normalizedBounds = MarkupGeometry.shapeBounds(
+                kind: kind, from: from, to: to,
+                widthFraction: MarkPalette.fraction(MarkPalette.strokeWidths, level: widthLevel),
+                canvasSize: imageSize
+            )
+        }
+        guard let b = normalizedBounds else { return nil }
+        return CGRect(x: fit.minX + b.minX * fit.width,
+                      y: fit.minY + b.minY * fit.height,
+                      width: b.width * fit.width,
+                      height: b.height * fit.height)
     }
 
     private func hitHandle(at location: CGPoint, fit: CGRect) -> CropHandle {
@@ -247,13 +324,15 @@ struct CropCanvas: View {
 ///
 /// 这里用 NSView 自己吃事件,并用 `nextEvent` 跟踪循环把 dragged/up 从窗口拖移里抢走。
 struct CanvasMouseCatcher: NSViewRepresentable {
-    var onDown: (CGPoint) -> Void
+    var onDown: (CGPoint, Int) -> Void
     var onDrag: (CGPoint) -> Void
     var onUp: () -> Void
     /// 常规光标(按工具设置);悬停到可交互对象上时换手型
     var baseCursor: NSCursor = .arrow
     /// 悬停命中测试;nil 表示本画布无可交互对象提示(裁切画布)
     var hoverHitTest: ((CGPoint) -> Bool)?
+    /// 指针移动(视图坐标);离开时为 nil
+    var onHoverMove: ((CGPoint?) -> Void)?
     /// 右键菜单;返回 nil 表示此处无菜单
     var contextMenuProvider: ((CGPoint) -> NSMenu?)?
     /// 滚轮/触控板滑动(dx/dy 容器坐标增量,command 是否按住)
@@ -283,6 +362,7 @@ struct CanvasMouseCatcher: NSViewRepresentable {
         view.onUp = onUp
         view.baseCursor = baseCursor
         view.hoverHitTest = hoverHitTest
+        view.onHoverMove = onHoverMove
         view.contextMenuProvider = contextMenuProvider
         view.onScroll = onScroll
         view.onMagnify = onMagnify
@@ -293,11 +373,12 @@ struct CanvasMouseCatcher: NSViewRepresentable {
     }
 
     final class Catcher: NSView {
-        var onDown: ((CGPoint) -> Void)?
+        var onDown: ((CGPoint, Int) -> Void)?
         var onDrag: ((CGPoint) -> Void)?
         var onUp: (() -> Void)?
         var baseCursor: NSCursor = .arrow
         var hoverHitTest: ((CGPoint) -> Bool)?
+        var onHoverMove: ((CGPoint?) -> Void)?
         var contextMenuProvider: ((CGPoint) -> NSMenu?)?
         var onScroll: ((_ dx: CGFloat, _ dy: CGFloat, _ commandHeld: Bool) -> Void)?
         var onMagnify: ((_ factor: CGFloat, _ anchor: CGPoint) -> Void)?
@@ -339,7 +420,11 @@ struct CanvasMouseCatcher: NSViewRepresentable {
             guard keyMonitor == nil else { return }
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
                 if event.keyCode == 49, let self {
-                    self.spaceDown = self.spacePanEnabled && event.type == .keyDown
+                    let down = self.spacePanEnabled && event.type == .keyDown
+                    if down != self.spaceDown {
+                        self.spaceDown = down
+                        self.window?.invalidateCursorRects(for: self)
+                    }
                 }
                 return event
             }
@@ -369,7 +454,13 @@ struct CanvasMouseCatcher: NSViewRepresentable {
 
         override func mouseMoved(with event: NSEvent) {
             let point = convert(event.locationInWindow, from: nil)
-            guard bounds.contains(point), let test = hoverHitTest else {
+            guard bounds.contains(point) else {
+                onHoverMove?(nil)
+                setHovering(false)
+                return
+            }
+            onHoverMove?(point)
+            guard let test = hoverHitTest else {
                 setHovering(false)
                 return
             }
@@ -377,6 +468,7 @@ struct CanvasMouseCatcher: NSViewRepresentable {
         }
 
         override func mouseExited(with event: NSEvent) {
+            onHoverMove?(nil)
             setHovering(false)
         }
 
@@ -387,7 +479,15 @@ struct CanvasMouseCatcher: NSViewRepresentable {
         }
 
         override func resetCursorRects() {
-            addCursorRect(bounds, cursor: hovering ? .pointingHand : baseCursor)
+            let cursor: NSCursor
+            if spaceDown {
+                cursor = panStart == nil ? .openHand : .closedHand
+            } else if hovering {
+                cursor = .pointingHand
+            } else {
+                cursor = baseCursor
+            }
+            addCursorRect(bounds, cursor: cursor)
         }
 
         override func menu(for event: NSEvent) -> NSMenu? {
@@ -418,8 +518,9 @@ struct CanvasMouseCatcher: NSViewRepresentable {
             if spaceDown, spacePanEnabled {
                 panStart = point
                 onPanStart?()
+                window?.invalidateCursorRects(for: self)
             } else {
-                onDown?(point)
+                onDown?(point, event.clickCount)
             }
             runTrackingLoop()
         }
@@ -457,6 +558,7 @@ struct CanvasMouseCatcher: NSViewRepresentable {
             if panStart != nil {
                 panStart = nil
                 onPanEnd?()
+                window?.invalidateCursorRects(for: self)
             } else {
                 onUp?()
             }

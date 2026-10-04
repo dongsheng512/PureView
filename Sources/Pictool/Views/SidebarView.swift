@@ -222,6 +222,29 @@ enum ChromeTheme {
     static func hairline(_ canvas: CanvasBackground) -> Color {
         canvas.prefersDarkChrome ? Color.white.opacity(0.10) : Color.black.opacity(0.06)
     }
+
+    /// 侧栏与主区的竖缝。跟随派生界面明暗(磨砂按深色走白线)。
+    static func sidebarSplit(_ canvas: CanvasBackground, hovering: Bool) -> Color {
+        canvas.prefersDarkChrome
+            ? Color.white.opacity(hovering ? 0.22 : 0.12)
+            : Color.black.opacity(hovering ? 0.14 : 0.07)
+    }
+}
+
+/// 窗口外壳指标。14–15 保持现有数值;26+ 只对齐系统窗口外轮廓,不改内部控件密度。
+enum WindowChromeMetrics {
+    /// 非全屏、非纯净时的窗口裁切圆角。
+    ///
+    /// 26+ 必须为 0:系统 theme frame 已经按本机窗口半径裁切(Tahoe 约 26,Golden Gate 约 16)。
+    /// 再叠一层 `layer.cornerRadius` 会对不齐,侧栏磨砂四角露出浅色缝。
+    static var cornerRadius: CGFloat {
+        if #available(macOS 26.0, *) { 0 } else { 10 }
+    }
+
+    /// 红绿灯距窗口左缘。圆角变大时略增,避免红灯吃进弧。
+    static var trafficLightLeading: CGFloat {
+        if #available(macOS 26.0, *) { 12 } else { 8 }
+    }
 }
 
 /// 主区顶栏/底栏/欢迎页,跟画布纯色

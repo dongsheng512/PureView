@@ -60,7 +60,7 @@ enum EditTool: String, CaseIterable, Identifiable, Sendable {
         case .crop: "crop"
         case .text: "character.cursor.ibeam"
         case .brush: "paintbrush.pointed"
-        case .mosaic: "squareshape.split.3x3"
+        case .mosaic: "mosaic"
         case .eraser: "eraser"
         case .shape: "rectangle.dashed"
         }
@@ -623,4 +623,27 @@ struct EditSnapshot: Equatable {
     var flipV: Bool
     var straighten: Double
     var annotations: [Annotation]
+    /// 撤销后回到这一笔之前的选中。对象已不在列表里则为 nil。
+    var selectedID: UUID?
+}
+
+/// 一张图在本次进程里的编辑会话:标记和裁切/旋转一起活,退出应用即丢。
+struct EditSession: Equatable, Sendable {
+    var annotations: [Annotation] = []
+    var selection: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+    var quarterTurns: Int = 0
+    var flipH = false
+    var flipV = false
+    var straighten = 0.0
+
+    var isPristine: Bool {
+        annotations.isEmpty
+            && abs(selection.minX) < 0.0001
+            && abs(selection.minY) < 0.0001
+            && abs(selection.width - 1) < 0.0001
+            && abs(selection.height - 1) < 0.0001
+            && ((quarterTurns % 4) + 4) % 4 == 0
+            && !flipH && !flipV
+            && abs(straighten) < 0.0001
+    }
 }

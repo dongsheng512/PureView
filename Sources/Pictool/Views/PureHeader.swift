@@ -23,8 +23,8 @@ struct PureHeader: View {
             Spacer()
             rightCluster
         }
-        // 非全屏贴齐原生红绿灯左边距(约 8pt);全屏无灯,用和右侧一样的 12pt
-        .padding(.leading, isFullScreen ? 12 : 8)
+        // 全屏无灯用右侧同样的 12pt;非全屏跟系统窗口圆角走(14–15 为 8,26+ 为 12)
+        .padding(.leading, isFullScreen ? 12 : WindowChromeMetrics.trafficLightLeading)
         .padding(.trailing, 12)
         .environment(\.colorScheme, mainHeaderColorScheme)
         .frame(height: 32)
@@ -77,11 +77,13 @@ struct PureHeader: View {
                 NativeTrafficLights()
                     .frame(width: NativeTrafficLights.width, height: NativeTrafficLights.height)
             }
-            // 灯组与侧栏按钮分开:系统工具栏大约 16pt,不要和三盏灯挤成一排
+            // 灯组与侧栏按钮分开,不要和三盏灯挤成一排。
+            // 数值跟随灯槽宽(见 `NativeTrafficLights.trailingGap`):槽加宽多少、这里就收窄多少,
+            // 左簇(侧栏按钮 + 标题)位置不变。全屏时红绿灯交还系统,不留空隙。
             HeaderButton("sidebar.leading", help: "显示/隐藏侧栏 (⌃⌘S)") {
                 store.toggleSidebar()
             }
-            .padding(.leading, isFullScreen ? 0 : 16)
+            .padding(.leading, isFullScreen ? 0 : NativeTrafficLights.trailingGap)
             Text("PureView")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
@@ -165,13 +167,17 @@ private struct HeaderButton: View {
             Image(systemName: systemImage)
                 .font(.system(size: 12, weight: emphasized ? .semibold : .regular))
                 .frame(width: 24, height: 20)
-                .background(
-                    // 选中态只用填充表达(macOS 工具栏范式):阴影语义是"抬升",和"按下"矛盾
-                    emphasized
-                        ? Color.accentColor.opacity(0.18)
-                        : (hovering && !disabled ? Color.primary.opacity(0.08) : .clear),
-                    in: RoundedRectangle(cornerRadius: 4)
-                )
+                .background {
+                    // 选中态只用填充表达(macOS 工具栏范式):阴影语义是"抬升",和"按下"矛盾。
+                    // 26 起底衬换成系统玻璃(选中叠 accent 色调、hover 素玻璃、静止全透明),
+                    // **占位仍然是 24×20 —— 顶栏不会被撑宽**。
+                    AdaptiveButtonFill(
+                        emphasized: emphasized,
+                        hovering: hovering,
+                        disabled: disabled,
+                        cornerRadius: 4
+                    )
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -188,7 +194,17 @@ private struct HeaderDivider: View {
 
 /// 把窗口自带的关闭/最小化/缩放按钮嵌进自定义顶栏,保留系统绘制、悬停符号和无障碍。
 struct NativeTrafficLights: NSViewRepresentable {
-    static let width: CGFloat = 56
+    /// 灯槽必须盖住三颗系统按钮:全程不裁剪,槽窄了绿灯会画进后面的空隙。
+    /// ≤26 组宽 54(槽 56);27 组宽 60(槽 62)。
+    static var width: CGFloat {
+        if #available(macOS 27.0, *) { 62 } else { 56 }
+    }
+
+    /// 槽加宽多少、这里就收窄多少,侧栏按钮左缘仍在窗口 84pt。
+    static var trailingGap: CGFloat {
+        if #available(macOS 27.0, *) { 10 } else { 16 }
+    }
+
     static let height: CGFloat = 16
 
     func makeNSView(context: Context) -> NativeTrafficLightsView {

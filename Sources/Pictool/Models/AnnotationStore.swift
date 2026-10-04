@@ -1,24 +1,39 @@
 import Foundation
 
-/// 进程内标记缓存。关 sheet / 切图不丢,退出即丢。
+/// 进程内编辑会话。关编辑 / 切图不丢,退出应用即丢。不写盘。
 @MainActor
 @Observable
 final class AnnotationStore {
-    private var items: [String: [Annotation]] = [:]
+    private var sessions: [String: EditSession] = [:]
     /// 编辑器 ⌘C/⌘V 的内存剪贴板(不写系统粘贴板,退出即丢)
     private(set) var clipboard: Annotation?
 
-    func annotations(for url: URL) -> [Annotation] {
-        items[Self.storageKey(for: url)] ?? []
+    func hasSession(for url: URL) -> Bool {
+        sessions[Self.storageKey(for: url)] != nil
     }
 
-    func set(_ annotations: [Annotation], for url: URL) {
+    func session(for url: URL) -> EditSession {
+        sessions[Self.storageKey(for: url)] ?? EditSession()
+    }
+
+    func setSession(_ session: EditSession, for url: URL) {
         let key = Self.storageKey(for: url)
-        if annotations.isEmpty {
-            items.removeValue(forKey: key)
+        if session.isPristine {
+            sessions.removeValue(forKey: key)
         } else {
-            items[key] = annotations
+            sessions[key] = session
         }
+    }
+
+    func annotations(for url: URL) -> [Annotation] {
+        session(for: url).annotations
+    }
+
+    /// 只替换标记,裁切和旋转留在原会话里。全空且几何是初始值时整段丢掉。
+    func set(_ annotations: [Annotation], for url: URL) {
+        var session = session(for: url)
+        session.annotations = annotations
+        setSession(session, for: url)
     }
 
     func copyToClipboard(_ annotation: Annotation) {

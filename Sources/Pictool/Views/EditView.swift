@@ -66,6 +66,8 @@ struct EditView: View {
     @State private var moveStartTo = CGPoint.zero
     @State private var livePoints: [CGPoint] = []
     @State private var erasedInGesture = false
+    /// 橡皮悬停将要整笔删掉的对象。只高亮,不改选中。
+    @State private var eraserHoverID: UUID?
     @State private var syncingControls = false
     @State private var selectingExisting = false
     @State private var grabOffset = CGSize.zero
@@ -103,6 +105,9 @@ struct EditView: View {
     /// 防止连点弹出两个打印面板。
     @State private var printPreparing = false
     @State private var errorMessage: String?
+    /// 「存储为」成功后的短提示。覆盖原图仍直接退出,不走这条。
+    @State private var exportNotice: String?
+    @State private var exportNoticeToken = 0
     @State private var format: CropFormat = .png
     // 质量与 GPS 开关跨会话记忆。格式**不记**:`CropFormat.default(forSourceExt:)` 按源扩展名
     // 给的默认值(JPEG 进 JPEG 出)比一个全局记忆更有用,用记忆覆盖它是退步。
@@ -151,8 +156,7 @@ struct EditView: View {
         }
         .onAppear {
             tool = initialTool
-            quarterTurns = ((initialQuarterTurns % 4) + 4) % 4
-            annotations = annotationStore.annotations(for: file.url)
+            restoreSession()
             watermarkDraft = WatermarkSettings.load()
             if !holdingWindowLock {
                 holdingWindowLock = true
@@ -179,10 +183,15 @@ struct EditView: View {
         .onChange(of: store.editTool) { _, newTool in
             switchTool(newTool)
         }
-        .onChange(of: annotations) { _, new in
-            annotationStore.set(new, for: file.url)
+        .onChange(of: annotations) { _, _ in
+            persistSession()
             scheduleOverlayRebuild()
         }
+        .onChange(of: selection) { _, _ in persistSession() }
+        .onChange(of: quarterTurns) { _, _ in persistSession() }
+        .onChange(of: flipH) { _, _ in persistSession() }
+        .onChange(of: flipV) { _, _ in persistSession() }
+        .onChange(of: straighten) { _, _ in persistSession() }
         .onChange(of: livePoints) { _, _ in
             guard tool == .mosaic else { return }
             scheduleOverlayRebuild()
@@ -200,8 +209,10 @@ struct EditView: View {
         }
         .onDisappear {
             store.editDisplayScale = 1
+            store.editHasSelection = false
         }
-        .onChange(of: selectedID) { _, _ in
+        .onChange(of: selectedID) { _, id in
+            store.editHasSelection = id != nil
             syncControlsFromSelection()
         }
         .onChange(of: draftEditingID) { _, _ in
@@ -294,7 +305,7 @@ struct EditView: View {
                 showWatermarkSettings.toggle()
             } label: {
                 Image(systemName: watermarkDraft.enabled && watermarkDraft.hasContent
-                        ? "checkmark.seal.fill" : "seal")
+                        ? "text.below.photo.fill" : "text.below.photo")
                     .font(.system(size: 12))
                     .foregroundStyle(watermarkDraft.enabled && watermarkDraft.hasContent
                                      ? Color.accentColor : Color.primary)
@@ -302,13 +313,9 @@ struct EditView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("水印设置(画布实时预览,导出时烙进像素)")
+            .help("水印(编辑导出时的默认)。画布实时预览,导出时烙进像素")
             .popover(isPresented: $showWatermarkSettings, arrowEdge: .bottom) {
-                Form {
-                    WatermarkSettingsForm(settings: $watermarkDraft)
-                }
-                .formStyle(.grouped)
-                .frame(width: 360)
+                WatermarkSettingsForm(settings: $watermarkDraft)
             }
 
             Menu {
@@ -515,7 +522,7 @@ struct EditView: View {
     /// 面板宽度。内容自身不再设 frame —— 宽度只在这一处定义,免得定位用的宽度与绘制宽度对不上。
     private var toolPanelWidth: CGFloat? {
         switch tool {
-        case .crop: 260
+        case .crop: 248
         case .text, .brush, .mosaic, .shape: 176
         case .eraser: nil
         }
@@ -647,24 +654,12 @@ struct EditView: View {
         }
     }
 
-    /// 裁切面板。顺序按使用频率排:**比例 → 拉直**,调完就在画布上拖选框。
-    /// 「尺寸读数」与「全选 / 重置」不在这里:前者本质是画布上的信息(贴选框角实时显示),
-    /// 后者是画布动作(右键菜单)。两者原本**全仓库只有这一个入口**,是搬家不是删除。
+    /// 裁切弹层:比例一行可滚,避免两排把面板拉高;拉直用面板全宽。
     private var cropMenu: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ratioSection
-            if ratio == .custom { customRatioFields }
-            straightenSection
-        }
-        .padding(10)
-    }
-
-    /// 比例:一行 chip,一次点击即选中(原来是 `Picker`,要先展开再选,两次点击)
-    private var ratioSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 4) {
                 Text("比例").font(.caption).foregroundStyle(.secondary)
-                Spacer()
+                Spacer(minLength: 0)
                 Button { swapRatio() } label: {
                     Image(systemName: "arrow.left.arrow.right").font(.system(size: 11))
                 }
@@ -672,25 +667,45 @@ struct EditView: View {
                 .disabled(!ratio.supportsSwap)
                 .help("交换比例方向")
             }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 5),
-                      spacing: 4) {
-                ForEach(CropRatio.allCases) { r in
-                    Button { pickRatio(r) } label: {
-                        Text(r.rawValue)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 4)
-                            .background {
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(Color.primary.opacity(ratio == r ? 0.16 : 0.05))
-                            }
-                            .contentShape(Rectangle())
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(CropRatio.allCases) { r in
+                        Button { pickRatio(r) } label: {
+                            Text(r.rawValue)
+                                .font(.system(size: 11))
+                                .lineLimit(1)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background {
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(Color.primary.opacity(ratio == r ? 0.16 : 0.05))
+                                }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
+            if ratio == .custom { customRatioFields }
+            HStack(spacing: 6) {
+                Text("拉直").font(.caption).foregroundStyle(.secondary)
+                Slider(value: $straighten, in: -45...45, onEditingChanged: { editing in
+                    if editing { pushUndo() }
+                })
+                .controlSize(.small)
+                .disabled(previewFailed)
+                .onChange(of: straighten) { _, _ in scheduleStraightenPreview() }
+                Text("\(straighten, specifier: "%.0f")°")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, alignment: .trailing)
+                Button("归零") { pushUndo(); straighten = 0; rebuildTransformedPreview() }
+                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .disabled(straighten == 0 || previewFailed)
+            }
         }
+        .padding(10)
     }
 
     private func pickRatio(_ r: CropRatio) {
@@ -714,26 +729,6 @@ struct EditView: View {
                 .multilineTextAlignment(.center)
                 .focused($editingCustomRatio)
                 .onSubmit { snapToRatio() }
-            Spacer()
-        }
-    }
-
-    private var straightenSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                Text("拉直").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Text("\(straighten, specifier: "%.0f")°")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Button("归零") { pushUndo(); straighten = 0; rebuildTransformedPreview() }
-                    .font(.caption)
-                    .buttonStyle(.plain)
-                    .disabled(straighten == 0 || previewFailed)
-            }
-            Slider(value: $straighten, in: -45...45)
-                .disabled(previewFailed)
-                .onChange(of: straighten) { _, _ in scheduleStraightenPreview() }
         }
     }
 
@@ -759,7 +754,19 @@ struct EditView: View {
                             watermark: liveWatermark,
                             // 尺寸读数搬到画布:它本质是「画布上的信息」,贴在选框角实时看得见
                             outputSize: transformedPixelSize.width > 0 ? pixelRect.size : .zero,
-                            contextMenuProvider: { _ in cropContextMenu() }
+                            contextMenuProvider: { _ in cropContextMenu() },
+                            annotationHitTest: { point in
+                                hitTest(at: point, kinds: [.text, .brush, .mosaic, .shape])
+                            },
+                            annotations: annotations,
+                            selectedAnnotationID: selectedID,
+                            onSelectAnnotation: { id in
+                                if let id { selectedID = id } else { selectNone() }
+                            },
+                            onEditText: { id in
+                                switchTool(.text)
+                                beginEdit(id: id)
+                            }
                         )
                     }
                 } else {
@@ -788,6 +795,11 @@ struct EditView: View {
                         draftEditingID: draftEditingID,
                         draftFocused: $draftFocused,
                         onDragStart: handleDragStart,
+                        onTextDoubleClick: { point in
+                            guard let id = hitTest(at: point, kinds: [.text]) else { return false }
+                            beginEdit(id: id)
+                            return true
+                        },
                         onDragChange: handleDragChange,
                         onDragEnd: handleDragEnd,
                         onDraftSubmit: { commitDraft() },
@@ -796,8 +808,21 @@ struct EditView: View {
                         watermark: liveWatermark,
                         zoom: editZoom,
                         pan: editPan,
+                        hoverID: tool == .eraser ? eraserHoverID : nil,
                         hoverTest: tool == .crop ? nil : { (point: CGPoint) in
                             hitTest(at: point, kinds: [.text, .brush, .mosaic, .shape]) != nil
+                        },
+                        onCanvasHover: { point in
+                            guard tool == .eraser else {
+                                if eraserHoverID != nil { eraserHoverID = nil }
+                                return
+                            }
+                            guard let point else {
+                                eraserHoverID = nil
+                                return
+                            }
+                            let hit = hitTest(at: point, kinds: [.text, .brush, .mosaic, .shape])
+                            if hit != eraserHoverID { eraserHoverID = hit }
                         },
                         baseCursor: tool == .text ? .iBeam : .crosshair,
                         contextMenuProvider: tool == .crop ? nil : { (point: CGPoint) in contextMenu(at: point) },
@@ -824,6 +849,20 @@ struct EditView: View {
         .frame(maxHeight: .infinity)
         // 缩放后图片不允许溢出画布区盖住顶栏/底栏
         .clipped()
+        .overlay(alignment: .bottom) {
+            if let exportNotice {
+                Text(exportNotice)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 12)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: exportNotice)
     }
 
     /// 切工具保留选中(对齐预览.app);清草稿、弹层与全部手势残状态。
@@ -839,6 +878,7 @@ struct EditView: View {
         livePoints = []
         liveShapeTo = nil
         erasedInGesture = false
+        eraserHoverID = nil
         tapCandidate = false
         tool = t
         // 回写给菜单 C/D 门禁与状态栏(顶栏切换不走 beginEdit 通道)
@@ -1089,9 +1129,7 @@ struct EditView: View {
         return item
     }
 
-    /// 裁切画布的右键菜单。原先是 `cropMenu` 底部的两个按钮 —— 挤在一个浮层里,
-    /// 而这两个动作恰恰是「看着画布再决定」的一环,搬到画布上位置感才对。
-    /// ⚠️ 这两项**全仓库只有此处与 `cropMenu`(已移除)两处入口**,属于搬家不是删除。
+    /// 全选 / 重置选框在画布右键,不放进裁切弹层。
     private func cropContextMenu() -> NSMenu? {
         guard !previewFailed else { return nil }
         let menu = NSMenu()
@@ -1401,7 +1439,7 @@ struct EditView: View {
 
     private func currentSnapshot() -> EditSnapshot {
         EditSnapshot(selection: selection, quarterTurns: quarterTurns, flipH: flipH, flipV: flipV,
-                     straighten: straighten, annotations: annotations)
+                     straighten: straighten, annotations: annotations, selectedID: selectedID)
     }
 
     private func applySnapshot(_ snap: EditSnapshot) {
@@ -1413,6 +1451,9 @@ struct EditView: View {
         flipV = snap.flipV
         straighten = snap.straighten
         annotations = snap.annotations
+        selectedID = snap.selectedID.flatMap { id in
+            annotations.contains(where: { $0.id == id }) ? id : nil
+        }
         if transformChanged { rebuildTransformedPreview() }
         else { rebuildOverlay() }
     }
@@ -1429,7 +1470,6 @@ struct EditView: View {
         guard let last = undoStack.popLast() else { return }
         redoStack.append(currentSnapshot())
         applySnapshot(last)
-        selectNone()
     }
 
     private func redo() {
@@ -1437,7 +1477,6 @@ struct EditView: View {
         guard let next = redoStack.popLast() else { return }
         undoStack.append(currentSnapshot())
         applySnapshot(next)
-        selectNone()
     }
 
     private func deleteSelected() {
@@ -1739,6 +1778,32 @@ struct EditView: View {
         mutateSelection(CropMath.clampedNormalized(CGRect(x: x, y: y, width: width, height: height), minSize: 0.05))
     }
 
+    /// 有会话就整段恢复(标记 + 裁切 + 旋转);没有则只用浏览模式带进来的旋转。
+    private func restoreSession() {
+        guard annotationStore.hasSession(for: file.url) else {
+            quarterTurns = ((initialQuarterTurns % 4) + 4) % 4
+            return
+        }
+        let saved = annotationStore.session(for: file.url)
+        annotations = saved.annotations
+        selection = saved.selection
+        quarterTurns = saved.quarterTurns
+        flipH = saved.flipH
+        flipV = saved.flipV
+        straighten = saved.straighten
+    }
+
+    private func persistSession() {
+        annotationStore.setSession(EditSession(
+            annotations: annotations,
+            selection: selection,
+            quarterTurns: quarterTurns,
+            flipH: flipH,
+            flipV: flipV,
+            straighten: straighten
+        ), for: file.url)
+    }
+
     private func loadPreview() {
         let url = file.url
         format = CropFormat.default(forSourceExt: url.pathExtension)
@@ -1953,9 +2018,20 @@ struct EditView: View {
         guard let dest else { return }
         do {
             try data.write(to: dest, options: .atomic)
-            onClose()
+            showExportNotice(dest.lastPathComponent)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func showExportNotice(_ name: String) {
+        exportNoticeToken += 1
+        let token = exportNoticeToken
+        exportNotice = "已存储 \(name)"
+        Task {
+            try? await Task.sleep(for: .seconds(2.5))
+            guard exportNoticeToken == token else { return }
+            exportNotice = nil
         }
     }
 }
@@ -1975,17 +2051,13 @@ private struct ToolAnchorKey: PreferenceKey {
     }
 }
 
-/// 自绘面板的外观:尽量贴近系统 popover(材质底 + 0.5px 描边 + 柔和阴影)。
-/// 用 `.regularMaterial` 而不是纯色 —— 编辑态的画布底色可切换(浅/深),材质会自动跟随。
+/// 自绘面板的外观:尽量贴近系统 popover。
+/// **26 起系统 popover 是玻璃,所以这里也走玻璃**(见 `AdaptiveGlassSurface`);
+/// 26 以下保持原来的"材质底 + 0.5px 描边 + 柔和阴影"。
+/// 用材质/玻璃而不是纯色 —— 编辑态的画布底色可切换(浅/深),底衬会自动跟随。
 private struct ToolPanelBackground: View {
     var body: some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(.regularMaterial)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+        AdaptiveGlassSurface(shape: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -2119,6 +2191,8 @@ private struct MarkupCanvas: View {
     let draftEditingID: UUID?
     var draftFocused: FocusState<Bool>.Binding
     let onDragStart: (CGPoint) -> Void
+    /// 双击文字。返回 true 表示已进入编辑,这次按下不再当成拖动。
+    var onTextDoubleClick: ((CGPoint) -> Bool)?
     let onDragChange: (CGPoint) -> Void
     let onDragEnd: (CGPoint) -> Void
     let onDraftSubmit: () -> Void
@@ -2128,8 +2202,12 @@ private struct MarkupCanvas: View {
     /// 视口缩放/平移(EditView 持有,裁切切换不销毁)
     var zoom: CGFloat = 1
     var pan: CGSize = .zero
+    /// 橡皮悬停将删除的对象。只画高亮框,不带动选中手柄。
+    var hoverID: UUID?
     /// 悬停命中(归一化坐标进出);nil 表示无悬停手型提示
     var hoverTest: ((CGPoint) -> Bool)?
+    /// 指针在图上移动;离开图或画布时为 nil
+    var onCanvasHover: ((CGPoint?) -> Void)?
     /// 按工具的常规光标
     var baseCursor: NSCursor = .arrow
     /// 右键菜单(归一化坐标进出);nil 表示无
@@ -2175,6 +2253,7 @@ private struct MarkupCanvas: View {
                 WatermarkStampLayer(settings: watermark, frame: cropBox)
 
                 selectionOutline(fit: fit)
+                eraserHoverOutline(fit: fit)
 
                 if !livePoints.isEmpty, tool != .mosaic {
                     liveStrokePath(fit: fit)
@@ -2185,7 +2264,7 @@ private struct MarkupCanvas: View {
                 }
 
                 CanvasMouseCatcher(
-                    onDown: { point in pointerDown(point, fit: fit) },
+                    onDown: { point, clicks in pointerDown(point, fit: fit, clickCount: clicks) },
                     onDrag: { point in pointerDrag(point, fit: fit) },
                     onUp: { pointerUp(fit: fit) },
                     baseCursor: baseCursor,
@@ -2193,6 +2272,13 @@ private struct MarkupCanvas: View {
                         { screenPoint in
                             fit.contains(screenPoint) && test(normalized(screenPoint, fit))
                         }
+                    },
+                    onHoverMove: { screenPoint in
+                        guard let screenPoint, fit.contains(screenPoint) else {
+                            onCanvasHover?(nil)
+                            return
+                        }
+                        onCanvasHover?(normalized(screenPoint, fit))
                     },
                     contextMenuProvider: contextMenuProvider.map { provider in
                         { screenPoint in
@@ -2250,9 +2336,14 @@ private struct MarkupCanvas: View {
     /// 草稿期间发生过任何按键(含 IME 组合):占位文字退场,避免与候选预览重叠
     @State private var draftInteracted = false
 
-    private func pointerDown(_ point: CGPoint, fit: CGRect) {
+    private func pointerDown(_ point: CGPoint, fit: CGRect, clickCount: Int) {
         lastPointer = point
         guard fit.contains(point) else {
+            dragStarted = false
+            return
+        }
+        if clickCount >= 2, tool == .text,
+           onTextDoubleClick?(normalized(point, fit)) == true {
             dragStarted = false
             return
         }
@@ -2424,7 +2515,11 @@ private struct MarkupCanvas: View {
     }
 
     private func selectionBounds(fit: CGRect) -> CGRect? {
-        guard let id = selectedID,
+        bounds(of: selectedID, fit: fit)
+    }
+
+    private func bounds(of id: UUID?, fit: CGRect) -> CGRect? {
+        guard let id,
               let annotation = annotations.first(where: { $0.id == id }) else { return nil }
         let imageSize = image.size
         let normalizedBounds: CGRect?
@@ -2487,6 +2582,22 @@ private struct MarkupCanvas: View {
             }
             .frame(width: cropBox.width, height: cropBox.height)
             .offset(x: cropBox.minX, y: cropBox.minY)
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// 橡皮悬停:红虚线框出将整笔删掉的对象,不显示手柄。
+    @ViewBuilder
+    private func eraserHoverOutline(fit: CGRect) -> some View {
+        if tool == .eraser, let bounds = bounds(of: hoverID, fit: fit) {
+            ZStack {
+                Rectangle()
+                    .strokeBorder(Color.white.opacity(0.9), lineWidth: 2.2)
+                Rectangle()
+                    .strokeBorder(Color.red.opacity(0.9), style: StrokeStyle(lineWidth: 1.25, dash: [4, 3]))
+            }
+            .frame(width: bounds.width, height: bounds.height)
+            .position(x: bounds.midX, y: bounds.midY)
             .allowsHitTesting(false)
         }
     }
