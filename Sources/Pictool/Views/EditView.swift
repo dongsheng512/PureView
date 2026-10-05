@@ -117,7 +117,6 @@ struct EditView: View {
     @State private var showWatermarkSettings = false
     /// 工具属性面板是否展开。**不是系统 .popover**:那玩意是 transient 语义,在画布上
     /// 每按一次鼠标就关一次,而裁切的自然流程恰恰是「调参数 ↔ 拖选框」来回切。
-    @State private var showToolPanel = false
     @State private var showColorPopover = false
     @State private var colorPanelListening = false
     @State private var showExportPopover = false
@@ -135,25 +134,6 @@ struct EditView: View {
         .environment(\.colorScheme, ChromeTheme.colorScheme(for: canvasBackground))
         .background(ChromeTheme.fill(canvasBackground))
         .background(WindowBackgroundMoveLock(allowMove: false))
-        // 工具属性面板。挂在**最外层** VStack 的 overlay 上,而不是各按钮自己的 overlay:
-        //   1) 面板要伸到画布上方,而 SwiftUI 的命中测试受祖先 bounds 约束 —— 挂在顶栏上
-        //      就只在顶栏那 32pt 内点得到,面板会「看得见、点不着」;
-        //   2) 作为最外层容器的子视图,它天然画在 canvasArea 的 `.clipped()` 之外、
-        //      也在 CanvasMouseCatcher 之上(与 MarkupCanvas 里草稿输入框同一套路数)。
-        .overlayPreferenceValue(ToolAnchorKey.self) { anchor in
-            GeometryReader { proxy in
-                if let anchor, showToolPanel, let width = toolPanelWidth {
-                    let button = proxy[anchor]
-                    toolPanelContent(tool)
-                        .frame(width: width)
-                        .background(ToolPanelBackground())
-                        .fixedSize(horizontal: false, vertical: true)
-                        .offset(x: panelOriginX(button: button, width: width,
-                                                container: proxy.size.width),
-                                y: button.maxY + 6)
-                }
-            }
-        }
         .onAppear {
             tool = initialTool
             restoreSession()
@@ -244,13 +224,35 @@ struct EditView: View {
 
     private var topBar: some View {
         HStack(spacing: 8) {
+            toolCluster
+            inlineOptions
+            transformCluster
+            undoCluster
+            Spacer()
+            watermarkButton
+            exportMenu
+            closeButton
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .background {
+            ZStack {
+                ChromeTheme.fill(canvasBackground)
+                hiddenShortcuts
+            }
+        }
+    }
+
+    private var toolCluster: some View {
+        HStack(spacing: 4) {
             ForEach(EditTool.allCases) { t in
                 toolbarToolButton(t)
             }
-            if usesMarkupColor {
-                colorToolbarButton
-            }
+        }
+    }
 
+    private var transformCluster: some View {
+        HStack(spacing: 6) {
             Divider().frame(height: 16)
 
             Button { rotate(cw: false) } label: {
@@ -279,7 +281,11 @@ struct EditView: View {
             .buttonStyle(.plain)
             .disabled(previewFailed)
             .help("垂直翻转")
+        }
+    }
 
+    private var undoCluster: some View {
+        HStack(spacing: 6) {
             Divider().frame(height: 16)
 
             Button { undo() } label: {
@@ -294,120 +300,181 @@ struct EditView: View {
             .buttonStyle(.plain)
             .disabled(redoStack.isEmpty)
             .help("重做 (⇧⌘Z)")
+        }
+    }
 
-            Spacer()
+    private var watermarkButton: some View {
+        Button {
+            showColorPopover = false
+            showWatermarkSettings.toggle()
+        } label: {
+            Image(systemName: watermarkDraft.enabled && watermarkDraft.hasContent
+                    ? "text.below.photo.fill" : "text.below.photo")
+                .font(.system(size: 12))
+                .foregroundStyle(watermarkDraft.enabled && watermarkDraft.hasContent
+                                 ? Color.accentColor : Color.primary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("水印(编辑导出时的默认)。画布实时预览,导出时烙进像素")
+        .popover(isPresented: $showWatermarkSettings, arrowEdge: .bottom) {
+            WatermarkSettingsForm(settings: $watermarkDraft)
+        }
+    }
 
-            // 水印独立入口:纯图标(无边框箭头),高度与颜色/大小 chip 一致;导出弹层里另有勾选项
-            Button {
-                // 面板是常驻的,开系统 popover 前先收掉,免得两块浮层叠在一起
-                showToolPanel = false
-                showColorPopover = false
-                showWatermarkSettings.toggle()
-            } label: {
-                Image(systemName: watermarkDraft.enabled && watermarkDraft.hasContent
-                        ? "text.below.photo.fill" : "text.below.photo")
-                    .font(.system(size: 12))
-                    .foregroundStyle(watermarkDraft.enabled && watermarkDraft.hasContent
-                                     ? Color.accentColor : Color.primary)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+    private var closeButton: some View {
+        Button { onClose() } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .medium))
+                .frame(width: 22, height: 18)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("退出编辑 (Esc)")
+    }
+
+    private var exportMenu: some View {
+        Menu {
+            Button("存储为…") {
+                closeStyleMenus()
+                showWatermarkSettings = false
+                showExportPopover = true
             }
-            .buttonStyle(.plain)
-            .help("水印(编辑导出时的默认)。画布实时预览,导出时烙进像素")
-            .popover(isPresented: $showWatermarkSettings, arrowEdge: .bottom) {
-                WatermarkSettingsForm(settings: $watermarkDraft)
-            }
-
-            Menu {
-                Button("存储为…") {
+            if overwriteFormat != nil {
+                Button("覆盖原图", role: .destructive) {
                     closeStyleMenus()
                     showWatermarkSettings = false
-                    showExportPopover = true
+                    export(overwrite: true)
                 }
-                if overwriteFormat != nil {
-                    Button("覆盖原图", role: .destructive) {
-                        closeStyleMenus()
-                        showWatermarkSettings = false
-                        export(overwrite: true)
-                    }
-                    .disabled(exporting || previewFailed)
-                }
-                Divider()
-                // 打印当前编辑结果。与 ⌘P 分开:⌘P 印的是磁盘原图,这里印的是裁切/水印/标注之后的。
-                Button("打印…") { printEdited() }
-                    .disabled(exporting || printPreparing || previewFailed)
-            } label: {
-                Text("导出")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(exportReady ? 1 : 0.65))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(
-                        // 与水印 chip 同一几何(12pt 字 + 4pt 垂直内边距),高度天然对齐
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.accentColor.opacity(exportReady ? 1 : 0.4))
-                    )
-                    .contentShape(Rectangle())
+                .disabled(exporting || previewFailed)
             }
-            // 纯按钮外观,点击任意处弹菜单(隐藏系统箭头指示器)
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .disabled(exporting || displayPreview == nil || previewFailed)
-            .popover(isPresented: $showExportPopover, arrowEdge: .bottom) {
-                ExportOptionsForm(
-                    format: $format,
-                    quality: $quality,
-                    includeGPS: $includeGPS,
-                    watermark: $watermarkDraft,
-                    exporting: exporting,
-                    onExport: {
-                        showExportPopover = false
-                        export(overwrite: false)
-                    },
-                    onWatermarkSettings: { showWatermarkSettings = true }
-                )
-            }
-
-            // 退出:叉形图标,置于最右
-            Button { onClose() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(width: 22, height: 18)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("退出编辑 (Esc)")
+            Divider()
+            // 打印当前编辑结果。与 ⌘P 分开:⌘P 印的是磁盘原图,这里印的是裁切/水印/标注之后的。
+            Button("打印…") { printEdited() }
+                .disabled(exporting || printPreparing || previewFailed)
         }
-        .padding(.horizontal, 12)
-        .frame(height: 32)
-        .background {
-            ZStack {
-                ChromeTheme.fill(canvasBackground)
-                hiddenShortcuts
+        label: {
+            Text("导出")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(exportReady ? 1 : 0.65))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.accentColor.opacity(exportReady ? 1 : 0.4))
+                )
+                .contentShape(Rectangle())
+        }
+        // 纯按钮外观,点击任意处弹菜单(隐藏系统箭头指示器)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(exporting || displayPreview == nil || previewFailed)
+        .popover(isPresented: $showExportPopover, arrowEdge: .bottom) {
+            ExportOptionsForm(
+                format: $format,
+                quality: $quality,
+                includeGPS: $includeGPS,
+                watermark: $watermarkDraft,
+                exporting: exporting,
+                onExport: {
+                    showExportPopover = false
+                    export(overwrite: false)
+                },
+                onWatermarkSettings: { showWatermarkSettings = true }
+            )
+        }
+    }
+
+    /// 当前工具的属性选项,内联在工具条上(替代原先的下拉浮层):
+    /// 调外观从「开面板→点」变一步,颜色与大小同处,切工具零布局跳动。
+    @ViewBuilder
+    private var inlineOptions: some View {
+        switch tool {
+        case .crop, .eraser:
+            EmptyView()
+        case .text: textOptions
+        case .brush: brushOptions
+        case .mosaic: mosaicOptions
+        case .shape: shapeOptions
+        }
+    }
+
+    private var textOptions: some View {
+        HStack(spacing: 8) { colorToolbarButton; levelChips }
+    }
+
+    private var brushOptions: some View {
+        HStack(spacing: 8) {
+            colorToolbarButton
+            styleChips(labels: StrokeStyleKind.allCases.map(\.label),
+                       selected: StrokeStyleKind.allCases.firstIndex(of: strokeStyle) ?? 0) {
+                applyStrokeStyleToSelection(StrokeStyleKind.allCases[$0])
+            }
+            levelChips
+        }
+    }
+
+    private var mosaicOptions: some View {
+        HStack(spacing: 8) {
+            styleChips(labels: MosaicEffect.allCases.map(\.label),
+                       selected: MosaicEffect.allCases.firstIndex(of: mosaicEffect) ?? 0) {
+                mosaicEffect = MosaicEffect.allCases[$0]
+            }
+            levelChips
+        }
+    }
+
+    private var shapeOptions: some View {
+        HStack(spacing: 8) { colorToolbarButton; shapeChips; levelChips }
+    }
+
+    private func styleChips(labels: [String], selected: Int,
+                            onPick: @escaping (Int) -> Void) -> some View {
+        HStack(spacing: 3) {
+            ForEach(labels.indices, id: \.self) { i in
+                TextChip(text: labels[i], selected: selected == i, action: { onPick(i) })
+            }
+        }
+        .disabled(previewFailed)
+    }
+
+    /// 形状种类内联在工具条上(图标档),不再放浮层网格。
+    private var shapeChips: some View {
+        HStack(spacing: 3) {
+            ForEach(ShapeKind.pickerOrder) { kind in
+                SymbolChip(symbol: kind.systemImage, selected: shapeKind == kind) {
+                    shapeKind = kind
+                }
             }
         }
     }
 
+    /// 小/中/大档位(字号/粗细/强度共用一个状态)。
+    private var levelChips: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<3) { i in
+                TextChip(text: ["小", "中", "大"][i], selected: sizeLevel == i) {
+                    sizeLevel = i
+                    applySizeLevelToSelection()
+                }
+            }
+        }
+        .disabled(previewFailed)
+    }
+
     private func toolbarToolButton(_ t: EditTool) -> some View {
-        let hasMenu = t != .eraser
-        let panelOpen = hasMenu && tool == t && showToolPanel
+        let isShape = t == .shape
         return Button {
             selectToolbarTool(t)
         } label: {
             HStack(spacing: 1) {
-                Image(systemName: t == .shape ? shapeKind.systemImage : t.systemImage)
+                Image(systemName: isShape ? shapeKind.systemImage : t.systemImage)
                     .font(.system(size: 12))
-                if hasMenu {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        // 展开时箭头翻转 —— 面板常驻之后,这是「这块面板属于这个按钮」的主要提示
-                        .rotationEffect(.degrees(panelOpen ? 180 : 0))
-                }
             }
-            .frame(width: hasMenu ? 34 : 26, height: 22)
+            .frame(width: isShape ? 30 : 26, height: 22)
             .background {
                 if tool == t {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -419,27 +486,11 @@ struct EditView: View {
         .buttonStyle(.plain)
         .help(t == .shape ? shapeKind.label : t.label)
         .accessibilityLabel(t == .shape ? shapeKind.label : t.label)
-        .accessibilityHint(t == .eraser ? "" : "打开\(t.label)选项")
-        // 只上报「当前工具」那一个按钮的 bounds:一次只开一块面板,用不着字典。
-        // 其余按钮返回 nil,reduce 里被忽略。
-        .anchorPreference(key: ToolAnchorKey.self, value: .bounds) { anchor in
-            tool == t ? anchor : nil
-        }
     }
 
     private func selectToolbarTool(_ t: EditTool) {
         showColorPopover = false
-        if t == .eraser {
-            showToolPanel = false
-            switchTool(t)
-            return
-        }
-        if tool == t {
-            showToolPanel.toggle()
-        } else {
-            switchTool(t)
-            showToolPanel = true
-        }
+        switchTool(t)
     }
 
     private var usesMarkupColor: Bool {
@@ -448,7 +499,6 @@ struct EditView: View {
 
     private var colorToolbarButton: some View {
         Button {
-            showToolPanel = false
             showColorPopover.toggle()
         } label: {
             HStack(spacing: 2) {
@@ -519,141 +569,6 @@ struct EditView: View {
         panel.isContinuous = true
         colorPanelListening = true
         panel.makeKeyAndOrderFront(nil)
-    }
-
-    /// 面板宽度。内容自身不再设 frame —— 宽度只在这一处定义,免得定位用的宽度与绘制宽度对不上。
-    private var toolPanelWidth: CGFloat? {
-        switch tool {
-        case .crop: 248
-        case .text, .brush, .mosaic, .shape: 176
-        case .eraser: nil
-        }
-    }
-
-    /// 面板水平位置:与按钮中心对齐,再夹进容器内(靠边的工具按钮不让面板出界)
-    private func panelOriginX(button: CGRect, width: CGFloat, container: CGFloat) -> CGFloat {
-        let ideal = button.midX - width / 2
-        return min(max(8, ideal), max(8, container - width - 8))
-    }
-
-    @ViewBuilder
-    private func toolPanelContent(_ t: EditTool) -> some View {
-        switch t {
-        case .crop:
-            cropMenu
-        case .text:
-            VStack(alignment: .leading, spacing: 10) {
-                levelPicker(title: "字号")
-            }
-            .padding(10)
-        case .brush:
-            VStack(alignment: .leading, spacing: 10) {
-                optionRow(title: "样式", labels: StrokeStyleKind.allCases.map(\.label),
-                          selected: StrokeStyleKind.allCases.firstIndex(of: strokeStyle) ?? 0) { i in
-                    applyStrokeStyleToSelection(StrokeStyleKind.allCases[i])
-                }
-                levelPicker(title: "粗细")
-            }
-            .padding(10)
-        case .mosaic:
-            VStack(alignment: .leading, spacing: 10) {
-                optionRow(title: "效果", labels: MosaicEffect.allCases.map(\.label),
-                          selected: MosaicEffect.allCases.firstIndex(of: mosaicEffect) ?? 0) { i in
-                    mosaicEffect = MosaicEffect.allCases[i]
-                }
-                levelPicker(title: "强度")
-            }
-            .padding(10)
-        case .shape:
-            // D3(借鉴预览):「选哪个形状」和「长什么样(粗细)」在视觉上分层。
-            // 原来只有 4 个无标注的图标顶着「粗细」,两组信息糊在一起。
-            VStack(alignment: .leading, spacing: 10) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("形状").font(.caption).foregroundStyle(.secondary)
-                    shapePickerGrid
-                }
-                levelPicker(title: "粗细")
-            }
-            .padding(10)
-        case .eraser:
-            EmptyView()
-        }
-    }
-
-    private func levelPicker(title: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 4) {
-                ForEach(["小", "中", "大"].indices, id: \.self) { i in
-                    Button {
-                        sizeLevel = i
-                        applySizeLevelToSelection()
-                    } label: {
-                        Text(["小", "中", "大"][i])
-                            .font(.system(size: 11))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 4)
-                            .background {
-                                if sizeLevel == i {
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .fill(Color.primary.opacity(0.08))
-                                }
-                            }
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    private func optionRow(title: String, labels: [String], selected: Int,
-                           onPick: @escaping (Int) -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 4) {
-                ForEach(labels.indices, id: \.self) { i in
-                    Button {
-                        onPick(i)
-                    } label: {
-                        Text(labels[i])
-                            .font(.system(size: 11))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 4)
-                            .background {
-                                if selected == i {
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .fill(Color.primary.opacity(0.08))
-                                }
-                            }
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    private var shapePickerGrid: some View {
-        // 4 × 36 + 3 × 4 = 156,正好是面板内宽(176 − 2×10),不再靠 maxWidth 撑开
-        HStack(spacing: 4) {
-            ForEach(ShapeKind.pickerOrder) { kind in
-                Button {
-                    shapeKind = kind
-                } label: {
-                    Image(systemName: kind.systemImage)
-                        .font(.system(size: 13, weight: .regular))
-                        .frame(width: 36, height: 28)
-                        .background {
-                            if shapeKind == kind {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(Color.primary.opacity(0.08))
-                            }
-                        }
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(kind.label)
-            }
-        }
     }
 
     /// 裁切弹层:比例 3 列网格全部可见(横向滚动会藏选项),拉直用面板全宽。
@@ -734,7 +649,6 @@ struct EditView: View {
     }
 
     private func closeStyleMenus() {
-        showToolPanel = false
         showColorPopover = false
         showExportPopover = false
     }
@@ -1092,12 +1006,12 @@ struct EditView: View {
         selectedID = annotations.last?.id
     }
 
-    /// Esc 的优先级:**先收面板 → 再退草稿 → 再取消选中 → 最后才退出编辑**。
-    /// 面板是常驻的,不加这一档就会「面板开着、一按 Esc 直接退出编辑」。
+    /// Esc 的优先级:先收弹层 → 再退草稿 → 再取消选中 → 最后才退出编辑。
     private func handleEscape() {
-        if showToolPanel || showColorPopover {
-            showToolPanel = false
+        if showColorPopover || showExportPopover || showWatermarkSettings {
             showColorPopover = false
+            showExportPopover = false
+            showWatermarkSettings = false
         } else if draftAnchor != nil {
             cancelDraft()
         } else if selectedID != nil {
@@ -2040,31 +1954,6 @@ struct EditView: View {
     }
 }
 
-/// 工具属性面板的锚点。
-///
-/// 面板一次只开一块,所以只需要「当前工具那个按钮」的 bounds —— 用可选值表达,
-/// 免掉 `[EditTool: Anchor<CGRect>]` 这类字典(也就不需要 `EditTool: Hashable` 之外的东西)。
-/// 其余按钮的 transform 返回 nil,在 `reduce` 里被忽略。
-///
-/// `defaultValue` 刻意写成**计算属性**而不是 `static let`:`Anchor` 不是 `Sendable`,
-/// 存成静态存储属性在 Swift 6 语言模式下会被判「非并发安全」。
-private struct ToolAnchorKey: PreferenceKey {
-    static var defaultValue: Anchor<CGRect>? { nil }
-    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
-        value = nextValue() ?? value
-    }
-}
-
-/// 自绘面板的外观:尽量贴近系统 popover。
-/// **26 起系统 popover 是玻璃,所以这里也走玻璃**(见 `AdaptiveGlassSurface`);
-/// 26 以下保持原来的"材质底 + 0.5px 描边 + 柔和阴影"。
-/// 用材质/玻璃而不是纯色 —— 编辑态的画布底色可切换(浅/深),底衬会自动跟随。
-private struct ToolPanelBackground: View {
-    var body: some View {
-        AdaptiveGlassSurface(shape: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-}
-
 /// 右键菜单 action 的 target:NSMenuItem 不持有 target,由调用方保活。
 @MainActor
 private final class ContextActionBox: NSObject {
@@ -2736,5 +2625,51 @@ private struct DraftKeyProbe: NSViewRepresentable {
         deinit {
             if let monitor { NSEvent.removeMonitor(monitor) }
         }
+    }
+}
+
+/// 工具条内联 chip(文字档):小/中/大、实线/荧光、像素/平滑。
+private struct TextChip: View {
+    let text: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(text)
+                .font(.system(size: 11))
+                .frame(minWidth: 26)
+                .frame(height: 20)
+                .padding(.horizontal, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(selected ? 0.14 : 0.05))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(text)
+    }
+}
+
+/// 工具条内联 chip(图标档):形状种类。
+private struct SymbolChip: View {
+    let symbol: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11))
+                .frame(width: 24, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(selected ? 0.14 : 0.05))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(symbol)
     }
 }

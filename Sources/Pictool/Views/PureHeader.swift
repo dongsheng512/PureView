@@ -122,8 +122,10 @@ struct PureHeader: View {
                 HeaderButton("printer", help: "打印 (⌘P)",
                              disabled: store.currentImage == nil) { store.requestPrint() }
             }
-            HeaderButton("info.circle", help: "图片信息 (I)") {
-                store.showInspector.toggle()
+            if !store.isEditing {
+                HeaderButton("info.circle", help: "图片信息 (I)") {
+                    store.showInspector.toggle()
+                }
             }
             if !store.isEditing {
                 HeaderButton(
@@ -395,4 +397,3 @@ final class NativeTrafficLightsView: NSView {
         }
     }
 }
-
