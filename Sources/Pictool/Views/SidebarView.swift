@@ -200,29 +200,10 @@ enum ChromeTheme {
         }
     }
 
-    /// 编辑/浏览画布:比顶栏底栏略深,工作区才从界面里分出来。
-    static func canvasFill(_ canvas: CanvasBackground) -> Color {
-        switch canvas {
-        case .dark: Color(white: 0.07)
-        case .light: Color(red: 0.945, green: 0.945, blue: 0.950)
-        case .frosted: Color.clear
-        }
-    }
-
-    /// 编辑工具条:比顶栏深一档(与画布同色)。
-    /// 「窗口栏 → 工具条 → 画布」按明度递进,色阶本身承担两层 bar 的分隔,
-    /// 不再依赖那条几乎看不见的 hairline。磨砂档返回 nil,由调用点叠轻染。
-    static func editToolbarFill(_ canvas: CanvasBackground) -> Color? {
-        switch canvas {
-        case .dark, .light: canvasFill(canvas)
-        case .frosted: nil
-        }
-    }
-
-    /// 磨砂档工具条的轻染:玻璃上叠一层极淡的主色,让工具条读作「工作区浮层」,
-    /// 与透玻璃的主顶栏拉开层级。其余档位用 nil(色阶已足够)。
-    static func editToolbarTint(_ canvas: CanvasBackground) -> Color? {
-        canvas == .frosted ? Color.primary.opacity(0.04) : nil
+    /// 图片描边。画布与顶栏统一色之后,白底图会和背景糊在一起,
+    /// 用一圈极淡的描边把「图片边界」交代清楚 —— 足够看见,又不会变成画框。
+    static func imageBorder(_ canvas: CanvasBackground) -> Color {
+        canvas.prefersDarkChrome ? Color.white.opacity(0.12) : Color.black.opacity(0.10)
     }
 
     static func colorScheme(for canvas: CanvasBackground) -> ColorScheme {

@@ -449,10 +449,18 @@ struct MainContentView: View {
             }
             .padding(.top, isFullScreen ? 0 : 32)
             if !isFullScreen {
-                PureHeader(sidebarWidth: sidebarWidth, isFullScreen: false)
-                    .frame(maxWidth: .infinity, alignment: .top)
                 // 竖缝一直挂着,x 跟侧栏收放走,避免只淡出、头身错开
                 sidebarColumnSplit
+            }
+        }
+        .overlayPreferenceValue(EditToolbarPreferenceKey.self, alignment: .top) { editingToolbar in
+            if !isFullScreen {
+                PureHeader(
+                    sidebarWidth: sidebarWidth,
+                    isFullScreen: false,
+                    editingToolbar: store.isEditing ? editingToolbar : nil
+                )
+                .frame(maxWidth: .infinity, alignment: .top)
             }
         }
         // 只绑 sidebarVisible,分隔线拖拽宽度的即时性不受影响
@@ -560,6 +568,7 @@ struct MainContentView: View {
                         file: file,
                         initialQuarterTurns: ((store.rotationCount % 4) + 4) % 4,
                         initialTool: store.editTool,
+                        toolbarInHeader: !isFullScreen,
                         onClose: { store.endEditing() }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

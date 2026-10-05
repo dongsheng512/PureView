@@ -10,6 +10,8 @@ struct PureHeader: View {
     var sidebarWidth: CGFloat? = nil
     /// 全屏时红绿灯交还给了系统标题栏(屏幕顶部那条自动隐藏的栏),这里不再占那一格
     var isFullScreen: Bool = false
+    /// 编辑状态下由 EditView 提供的工具组,与浏览操作共用这一条顶栏。
+    var editingToolbar: AnyView? = nil
     @AppStorage(SidebarTopStyle.storageKey) private var sidebarTopStyle = SidebarTopStyle.defaultValue
     @AppStorage(CanvasBackground.storageKey) private var canvasBackground = CanvasBackground.defaultValue
 
@@ -17,10 +19,28 @@ struct PureHeader: View {
         ChromeTheme.colorScheme(for: canvasBackground)
     }
 
+    /// 编辑模式下把左侧标题簇撑到侧栏宽度,让编辑工具从侧栏分界线右侧开始。
+    /// 搜索/浏览态侧栏顶段只做材质分区,没有跨区控件,不需要这层占位。
+    private var editingLeftReserve: CGFloat {
+        guard editingToolbar != nil, store.sidebarVisible, let sidebarWidth else { return 0 }
+        let leading = isFullScreen ? 12 : WindowChromeMetrics.trafficLightLeading
+        return max(0, sidebarWidth - leading)
+    }
+
     var body: some View {
         HStack(spacing: 5) {
             leftCluster
-            Spacer()
+                .frame(minWidth: editingLeftReserve, alignment: .leading)
+            if let editingToolbar {
+                // 必须是可伸缩容器:只有拿到父级给的确定宽度,内部 ViewThatFits 才能
+                // 在窄窗口下选到紧凑变体。fixedSize 会让它永远自认放得下,然后被裁掉。
+                // 也不能在它后面再挂 Spacer —— 两者会瓜分剩余宽度,导出就推不到最右。
+                editingToolbar
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .clipped()
+            } else {
+                Spacer()
+            }
             rightCluster
         }
         // 全屏无灯用右侧同样的 12pt;非全屏跟系统窗口圆角走(14–15 为 8,26+ 为 12)

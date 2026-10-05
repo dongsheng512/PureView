@@ -38,6 +38,8 @@ struct CropCanvas: View {
     var onSelectAnnotation: ((UUID?) -> Void)?
     /// 双击文字:切回文字工具并进入编辑
     var onEditText: ((UUID) -> Void)?
+    /// 图片描边色。画布与顶栏同一底色后,靠这一圈极淡的描边把图片范围交代出来。
+    var imageBorder: Color = .clear
 
     @State private var dragBaseline: CGRect?
     @State private var dragStartPoint: CGPoint?
@@ -68,6 +70,14 @@ struct CropCanvas: View {
                 }
 
                 dimming(fit: fit)
+
+                // 图片描边。压在压暗层**之上**,选框缩小时这条边界才不会被遮罩糊掉;
+                // 它在选框白线之前落地,两者都会画出来,互不覆盖。
+                Rectangle()
+                    .strokeBorder(imageBorder, lineWidth: 1)
+                    .frame(width: fit.width, height: fit.height)
+                    .offset(x: fit.minX, y: fit.minY)
+                    .allowsHitTesting(false)
 
                 // 水印按裁切输出画幅布局(与导出一致),落在选框内
                 WatermarkStampLayer(settings: watermark, frame: shown)

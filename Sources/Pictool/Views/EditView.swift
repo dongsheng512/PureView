@@ -2,6 +2,15 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+/// MainContentView 将编辑工具栏提升到窗口顶栏;通过 preference 保留 EditView 对工具状态的唯一所有权。
+struct EditToolbarPreferenceKey: PreferenceKey {
+    static var defaultValue: AnyView? { nil }
+
+    static func reduce(value: inout AnyView?, nextValue: () -> AnyView?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
 // 统一编辑器(预览.app 式工具条):裁切 / 文字 / 画笔 / 马赛克 / 橡皮。
 // 画布按工具切换;导出走 CropService(变换 → 烙印 → 裁切 → 水印)。
 
@@ -10,14 +19,17 @@ struct EditView: View {
     let file: ImageFile
     let initialQuarterTurns: Int
     var initialTool: EditTool = .text
+    var toolbarInHeader = false
 
     var onClose: () -> Void = {}
 
     init(file: ImageFile, initialQuarterTurns: Int, initialTool: EditTool = .text,
+         toolbarInHeader: Bool = false,
          onClose: @escaping () -> Void = {}) {
         self.file = file
         self.initialQuarterTurns = initialQuarterTurns
         self.initialTool = initialTool
+        self.toolbarInHeader = toolbarInHeader
         self.onClose = onClose
         _tool = State(initialValue: initialTool)
         _quarterTurns = State(initialValue: ((initialQuarterTurns % 4) + 4) % 4)
@@ -45,6 +57,7 @@ struct EditView: View {
     // 裁切选区(默认整图,未进裁切工具时导出整张)
     @State private var selection = CGRect(x: 0, y: 0, width: 1, height: 1)
     @State private var ratio: CropRatio = .free
+    @State private var showCropPopover = false
     @State private var customW = "4"
     @State private var customH = "3"
     @FocusState private var editingCustomRatio: Bool
@@ -119,15 +132,19 @@ struct EditView: View {
     /// 每按一次鼠标就关一次,而裁切的自然流程恰恰是「调参数 ↔ 拖选框」来回切。
     @State private var showColorPopover = false
     @State private var colorPanelListening = false
+    /// 窄窗口下工具选项收进弹层的开关
+    @State private var showCompactOptions = false
     @State private var showExportPopover = false
     @State private var holdingWindowLock = false
     @AppStorage(CanvasBackground.storageKey) private var canvasBackground = CanvasBackground.defaultValue
 
     var body: some View {
         VStack(spacing: 0) {
-            topBar
+            if !toolbarInHeader { topBar }
             canvasArea
         }
+        .preference(key: EditToolbarPreferenceKey.self,
+                    value: toolbarInHeader ? AnyView(headerToolbarContent) : nil)
         .environment(\.colorScheme, ChromeTheme.colorScheme(for: canvasBackground))
         .background(ChromeTheme.fill(canvasBackground))
         .background(WindowBackgroundMoveLock(allowMove: false))
@@ -234,29 +251,113 @@ struct EditView: View {
         .frame(height: 32)
         .background {
             ZStack {
-                toolbarBackground
+                // 与顶栏/画布同色:整窗一体。全屏下没有窗口顶栏,这条就是唯一的一条 bar,
+                // 再靠色阶分层就会和画布之间多出一道横向接缝(与主顶栏同一口径)。
+                ChromeTheme.fill(canvasBackground)
                 hiddenShortcuts
             }
         }
     }
 
-    /// 工具条底色:实/深档用画布色(比顶栏深一档,色阶分层),磨砂档透玻璃叠轻染。
+    /// 嵌入窗口主顶栏的紧凑工具组。变换动作合并到菜单,给应用导航和模式切换留出空间。
+    private var headerToolbarContent: some View {
+        // 三段式:工具 + 旋转/水印靠左、参数居中、撤销/导出靠右。两侧 Spacer 均分剩余空间,
+        // 参数组落在整条顶栏的视觉中点。侧栏拉宽 + 窗口收窄时内联参数最先放不下,
+        // ViewThatFits 退到紧凑变体,把参数收进弹层,其余控件保持可见。
+        ViewThatFits(in: .horizontal) {
+            fullHeaderToolbar
+            compactHeaderToolbar
+        }
+        // 快捷键命令随工具栏一同提升到窗口顶栏,避免嵌入模式丢失 ⌘Z / Esc 等操作。
+        .background(hiddenShortcuts)
+    }
+
+    /// 完整变体:每个分区各自 fixedSize,保证理想宽度诚实(供 ViewThatFits 判断放得下),
+    /// 同时 HStack 本身仍可伸展 —— 多余宽度归 Spacer,导出因此被推到右侧。
+    private var fullHeaderToolbar: some View {
+        HStack(spacing: 6) {
+            headerLeftActions
+                .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 10)
+            optionGroup
+                .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 10)
+            headerRightActions
+        }
+    }
+
+    private var compactHeaderToolbar: some View {
+        HStack(spacing: 6) {
+            headerLeftActions
+                .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 10)
+            compactOptionsButton
+            Spacer(minLength: 10)
+            headerRightActions
+        }
+    }
+
+    /// 左侧动作区:创建工具,后接旋转/翻转与水印,都属于"对图片本身动手"的动作。
+    private var headerLeftActions: some View {
+        HStack(spacing: 6) {
+            toolCluster
+            Divider().frame(height: 16)
+            transformMenu
+            watermarkButton
+        }
+    }
+
+    /// 右侧动作区。导出排在最后,贴住右侧导航组。
+    private var headerRightActions: some View {
+        HStack(spacing: 6) {
+            undoCluster
+            exportMenu
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// 窄窗口下的选项入口:同一组控件收进弹层,不牺牲任何参数。
     @ViewBuilder
-    private var toolbarBackground: some View {
-        ZStack {
-            if let fill = ChromeTheme.editToolbarFill(canvasBackground) {
-                fill
+    private var compactOptionsButton: some View {
+        if tool == .eraser {
+            EmptyView()
+        } else {
+            Button {
+                showCompactOptions.toggle()
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 11))
+                    .frame(width: 24, height: 22)
+                    .contentShape(Rectangle())
             }
-            if let tint = ChromeTheme.editToolbarTint(canvasBackground) {
-                tint
+            .buttonStyle(.plain)
+            .help("当前工具的选项")
+            .popover(isPresented: $showCompactOptions, arrowEdge: .bottom) {
+                compactOptionsPopover
             }
+        }
+    }
+
+    /// 裁切已有自己的面板,直接复用;其余工具把内联 chip 竖排搬进弹层。
+    @ViewBuilder
+    private var compactOptionsPopover: some View {
+        if tool == .crop {
+            cropMenu
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(tool.label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                inlineOptions
+            }
+            .padding(10)
         }
     }
 
     /// 当前工具的选项区,垫一层微容器:工具(创建动作)与选项(参数)在视觉上分组。
     @ViewBuilder
     private var optionGroup: some View {
-        if tool != .crop, tool != .eraser {
+        if tool != .eraser {
             HStack(spacing: 8) {
                 inlineOptions
             }
@@ -317,18 +418,54 @@ struct EditView: View {
             Divider().frame(height: 16)
 
             Button { undo() } label: {
-                Image(systemName: "chevron.uturn.backward").frame(width: 22, height: 18)
+                Image(systemName: "chevron.uturn.backward")
+                    .font(.system(size: 12))
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(undoStack.isEmpty)
             .help("撤销 (⌘Z)")
             Button { redo() } label: {
-                Image(systemName: "chevron.uturn.forward").frame(width: 22, height: 18)
+                Image(systemName: "chevron.uturn.forward")
+                    .font(.system(size: 12))
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(redoStack.isEmpty)
             .help("重做 (⇧⌘Z)")
         }
+    }
+
+    private var transformMenu: some View {
+        Menu {
+            Button { rotate(cw: false) } label: {
+                Label("逆时针旋转 90°", systemImage: "rotate.left")
+            }
+            Button { rotate(cw: true) } label: {
+                Label("顺时针旋转 90°", systemImage: "rotate.right")
+            }
+            Divider()
+            Button { toggleFlipH() } label: {
+                Label("水平翻转", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right")
+            }
+            Button { toggleFlipV() } label: {
+                Label("垂直翻转", systemImage: "arrow.up.and.down.righttriangle.left.righttriangle.right")
+            }
+        } label: {
+            Image(systemName: "rotate.right")
+                // 字号与 frame 必须和工具按钮完全一致:Menu label 不写 font 会落到默认
+                // 13pt,行盒比 12pt 高,居中后图标会比其他按钮低半格。
+                .font(.system(size: 12))
+                .frame(width: 26, height: 22)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .disabled(previewFailed)
+        .help("旋转与翻转")
     }
 
     private var watermarkButton: some View {
@@ -341,7 +478,8 @@ struct EditView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(watermarkDraft.enabled && watermarkDraft.hasContent
                                  ? Color.accentColor : Color.primary)
-                .frame(width: 24, height: 24)
+                // 高度跟工具按钮对齐(22 而非 24),否则在 HStack 里高出一截
+                .frame(width: 26, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -421,12 +559,36 @@ struct EditView: View {
     @ViewBuilder
     private var inlineOptions: some View {
         switch tool {
-        case .crop, .eraser:
+        case .crop:
+            cropOptionsButton
+        case .eraser:
             EmptyView()
         case .text: textOptions
         case .brush: brushOptions
         case .mosaic: mosaicOptions
         case .shape: shapeOptions
+        }
+    }
+
+    private var cropOptionsButton: some View {
+        Button {
+            showCropPopover.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 10, weight: .medium))
+                Text(ratio == .custom ? "\(customW):\(customH)" : ratio.rawValue)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+            }
+            .frame(height: 22)
+            .padding(.horizontal, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("裁切比例与拉直")
+        .popover(isPresented: $showCropPopover, arrowEdge: .bottom) {
+            cropMenu
         }
     }
 
@@ -650,6 +812,7 @@ struct EditView: View {
             }
         }
         .padding(10)
+        .frame(width: 250)
     }
 
     private func pickRatio(_ r: CropRatio) {
@@ -678,12 +841,16 @@ struct EditView: View {
 
     private func closeStyleMenus() {
         showColorPopover = false
+        showCompactOptions = false
+        showCropPopover = false
         showExportPopover = false
     }
 
     private var canvasArea: some View {
         ZStack {
-            ChromeTheme.canvasFill(canvasBackground)
+            // 与顶栏/底栏同色:整窗一体,不再有一道横向色阶接缝。
+            // 图片与背景的分界交给画布上那圈 imageBorder 描边。
+            ChromeTheme.fill(canvasBackground)
             if let displayPreview, transformedPixelSize.width > 0 {
                 if tool == .crop {
                     ZStack {
@@ -709,7 +876,8 @@ struct EditView: View {
                             onEditText: { id in
                                 switchTool(.text)
                                 beginEdit(id: id)
-                            }
+                            },
+                            imageBorder: ChromeTheme.imageBorder(canvasBackground)
                         )
                     }
                 } else {
@@ -773,7 +941,8 @@ struct EditView: View {
                         onMagnifyGesture: handleCanvasMagnify,
                         onPanGesture: handleCanvasPan,
                         onPanGestureEnd: { lastPanTranslation = .zero },
-                        onContainerChange: handleCanvasResize
+                        onContainerChange: handleCanvasResize,
+                        imageBorder: ChromeTheme.imageBorder(canvasBackground)
                     )
                 }
             } else if previewFailed {
@@ -1036,8 +1205,9 @@ struct EditView: View {
 
     /// Esc 的优先级:先收弹层 → 再退草稿 → 再取消选中 → 最后才退出编辑。
     private func handleEscape() {
-        if showColorPopover || showExportPopover || showWatermarkSettings {
+        if showColorPopover || showCropPopover || showExportPopover || showWatermarkSettings {
             showColorPopover = false
+            showCropPopover = false
             showExportPopover = false
             showWatermarkSettings = false
         } else if draftAnchor != nil {
@@ -2139,6 +2309,9 @@ private struct MarkupCanvas: View {
     var onPanGesture: ((_ translation: CGPoint, _ container: CGSize) -> Void)?
     var onPanGestureEnd: (() -> Void)?
     var onContainerChange: ((CGSize) -> Void)?
+    /// 图片描边色。画布与顶栏同一底色后,靠这一圈极淡的描边把图片范围交代出来;
+    /// 传 `.clear` 即关闭(如将来有别的画布宿主)。
+    var imageBorder: Color = .clear
 
     var body: some View {
         GeometryReader { geo in
@@ -2170,6 +2343,14 @@ private struct MarkupCanvas: View {
                 // 裁切范围提示:压在底图之上、标注之下。标注是用户正在交互的内容,
                 // 画在压暗层之上才不会在拖到框外时变灰看不清。
                 cropRangeOverlay(fit: fit, cropBox: cropBox)
+
+                // 图片描边。压在压暗层之上,边缘才是干净的一条,不会跟着压暗变灰;
+                // 标注意外的东西一律画在它之后,免得盖住这条边界。
+                Rectangle()
+                    .strokeBorder(imageBorder, lineWidth: 1)
+                    .frame(width: fit.width, height: fit.height)
+                    .offset(x: fit.minX, y: fit.minY)
+                    .allowsHitTesting(false)
 
                 WatermarkStampLayer(settings: watermark, frame: cropBox)
 
