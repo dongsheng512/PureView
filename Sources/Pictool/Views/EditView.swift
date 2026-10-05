@@ -401,7 +401,7 @@ struct EditView: View {
                     .font(.system(size: 12))
                 if hasMenu {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 6, weight: .bold))
+                        .font(.system(size: 8, weight: .bold))
                         .foregroundStyle(.secondary)
                         // 展开时箭头翻转 —— 面板常驻之后,这是「这块面板属于这个按钮」的主要提示
                         .rotationEffect(.degrees(panelOpen ? 180 : 0))
@@ -418,6 +418,8 @@ struct EditView: View {
         }
         .buttonStyle(.plain)
         .help(t == .shape ? shapeKind.label : t.label)
+        .accessibilityLabel(t == .shape ? shapeKind.label : t.label)
+        .accessibilityHint(t == .eraser ? "" : "打开\(t.label)选项")
         // 只上报「当前工具」那一个按钮的 bounds:一次只开一块面板,用不着字典。
         // 其余按钮返回 nil,reduce 里被忽略。
         .anchorPreference(key: ToolAnchorKey.self, value: .bounds) { anchor in
@@ -654,7 +656,7 @@ struct EditView: View {
         }
     }
 
-    /// 裁切弹层:比例一行可滚,避免两排把面板拉高;拉直用面板全宽。
+    /// 裁切弹层:比例 3 列网格全部可见(横向滚动会藏选项),拉直用面板全宽。
     private var cropMenu: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 4) {
@@ -667,23 +669,22 @@ struct EditView: View {
                 .disabled(!ratio.supportsSwap)
                 .help("交换比例方向")
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(CropRatio.allCases) { r in
-                        Button { pickRatio(r) } label: {
-                            Text(r.rawValue)
-                                .font(.system(size: 11))
-                                .lineLimit(1)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background {
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .fill(Color.primary.opacity(ratio == r ? 0.16 : 0.05))
-                                }
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 3),
+                      spacing: 4) {
+                ForEach(CropRatio.allCases) { r in
+                    Button { pickRatio(r) } label: {
+                        Text(r.rawValue)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                            .background {
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(Color.primary.opacity(ratio == r ? 0.16 : 0.05))
+                            }
+                            .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 }
             }
             if ratio == .custom { customRatioFields }
@@ -907,6 +908,9 @@ struct EditView: View {
                 .disabled(draftFocused)
             Button { switchTool(.mosaic) } label: { EmptyView() }
                 .keyboardShortcut("m", modifiers: [])
+                .disabled(draftFocused)
+            Button { switchTool(.crop) } label: { EmptyView() }
+                .keyboardShortcut("c", modifiers: [])
                 .disabled(draftFocused)
             Button { switchTool(.eraser) } label: { EmptyView() }
                 .keyboardShortcut("e", modifiers: [])
@@ -2734,5 +2738,3 @@ private struct DraftKeyProbe: NSViewRepresentable {
         }
     }
 }
-
-

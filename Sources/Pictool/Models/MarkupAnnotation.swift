@@ -43,7 +43,8 @@ enum StrokeStyleKind: String, CaseIterable, Identifiable, Sendable {
 }
 
 enum EditTool: String, CaseIterable, Identifiable, Sendable {
-    case crop, text, brush, mosaic, eraser, shape
+    // 创建工具在前(裁切/文字/形状/画笔/马赛克),删除类(橡皮)收尾
+    case crop, text, shape, brush, mosaic, eraser
     var id: String { rawValue }
     var label: String {
         switch self {
