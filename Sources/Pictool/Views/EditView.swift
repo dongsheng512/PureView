@@ -125,9 +125,6 @@ struct EditView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Rectangle()
-                .fill(ChromeTheme.hairline(canvasBackground))
-                .frame(height: 1)
             topBar
             canvasArea
         }
@@ -225,7 +222,7 @@ struct EditView: View {
     private var topBar: some View {
         HStack(spacing: 8) {
             toolCluster
-            inlineOptions
+            optionGroup
             transformCluster
             undoCluster
             Spacer()
@@ -237,9 +234,40 @@ struct EditView: View {
         .frame(height: 32)
         .background {
             ZStack {
-                ChromeTheme.fill(canvasBackground)
+                toolbarBackground
                 hiddenShortcuts
             }
+        }
+    }
+
+    /// 工具条底色:实/深档用画布色(比顶栏深一档,色阶分层),磨砂档透玻璃叠轻染。
+    @ViewBuilder
+    private var toolbarBackground: some View {
+        ZStack {
+            if let fill = ChromeTheme.editToolbarFill(canvasBackground) {
+                fill
+            }
+            if let tint = ChromeTheme.editToolbarTint(canvasBackground) {
+                tint
+            }
+        }
+    }
+
+    /// 当前工具的选项区,垫一层微容器:工具(创建动作)与选项(参数)在视觉上分组。
+    @ViewBuilder
+    private var optionGroup: some View {
+        if tool != .crop, tool != .eraser {
+            HStack(spacing: 8) {
+                inlineOptions
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.045))
+            }
+        } else {
+            inlineOptions
         }
     }
 

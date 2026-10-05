@@ -209,9 +209,20 @@ enum ChromeTheme {
         }
     }
 
-    /// 编辑工具条与顶栏同一底色,只靠 hairline 分开,避免两层色块。
-    static func editBarFill(_ canvas: CanvasBackground) -> Color {
-        fill(canvas)
+    /// 编辑工具条:比顶栏深一档(与画布同色)。
+    /// 「窗口栏 → 工具条 → 画布」按明度递进,色阶本身承担两层 bar 的分隔,
+    /// 不再依赖那条几乎看不见的 hairline。磨砂档返回 nil,由调用点叠轻染。
+    static func editToolbarFill(_ canvas: CanvasBackground) -> Color? {
+        switch canvas {
+        case .dark, .light: canvasFill(canvas)
+        case .frosted: nil
+        }
+    }
+
+    /// 磨砂档工具条的轻染:玻璃上叠一层极淡的主色,让工具条读作「工作区浮层」,
+    /// 与透玻璃的主顶栏拉开层级。其余档位用 nil(色阶已足够)。
+    static func editToolbarTint(_ canvas: CanvasBackground) -> Color? {
+        canvas == .frosted ? Color.primary.opacity(0.04) : nil
     }
 
     static func colorScheme(for canvas: CanvasBackground) -> ColorScheme {
