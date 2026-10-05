@@ -116,6 +116,18 @@ struct PictoolApp: App {
                     .disabled(store.currentImage == nil || store.isModalPresented
                               || store.visibleImages.count < 2)
             }
+            // 顶栏那个侧栏按钮的提示写着 ⌃⌘S,但快捷键一直只在按钮上、没进菜单 ——
+            // 菜单栏快捷键是 AppKit 那条路径,按钮的 tooltip 不会注册任何东西,按下去自然没反应。
+            // 挂到系统标准的 .sidebar 位置(「显示」菜单),对齐 Finder / Xcode 的同名命令。
+            CommandGroup(replacing: .sidebar) {
+                Button(store.sidebarVisible ? "隐藏侧栏" : "显示侧栏") {
+                    store.toggleSidebar()
+                }
+                .keyboardShortcut("s", modifiers: [.control, .command])
+                // toggleSidebar 自身在纯净模式里是空操作,菜单项如实置灰,
+                // 免得按下去没反应让人以为快捷键坏了
+                .disabled(store.isImmersive || store.isModalPresented)
+            }
             CommandMenu("图片") {
                 // 裸键与方向键在模态面板打开时一律失效,否则会在面板背后改动浏览状态。
                 // 另外还要让位给文本输入:缩略图过滤框是本窗口唯一的输入框,

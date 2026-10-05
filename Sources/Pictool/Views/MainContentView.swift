@@ -458,7 +458,8 @@ struct MainContentView: View {
                 PureHeader(
                     sidebarWidth: sidebarWidth,
                     isFullScreen: false,
-                    editingToolbar: store.isEditing ? editingToolbar : nil
+                    editingToolbar: store.isEditing ? editingToolbar : nil,
+                    splitHovering: isHoveringDivider
                 )
                 .frame(maxWidth: .infinity, alignment: .top)
             }

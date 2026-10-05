@@ -12,6 +12,9 @@ struct PureHeader: View {
     var isFullScreen: Bool = false
     /// 编辑状态下由 EditView 提供的工具组,与浏览操作共用这一条顶栏。
     var editingToolbar: AnyView? = nil
+    /// 侧栏拖拽热区是否悬停。顶栏这段的竖缝要跟着下半段一起亮/暗 ——
+    /// 否则同一条线在顶栏下沿会有一次颜色突变,读起来仍然是"断的"。
+    var splitHovering: Bool = false
     @AppStorage(SidebarTopStyle.storageKey) private var sidebarTopStyle = SidebarTopStyle.defaultValue
     @AppStorage(CanvasBackground.storageKey) private var canvasBackground = CanvasBackground.defaultValue
 
@@ -81,6 +84,15 @@ struct PureHeader: View {
                 // 宽度连续伸缩(而非可见性二值切换),与侧栏列宽动画完全同步
                 SidebarTopBackground()
                     .frame(width: store.sidebarVisible ? width : 0)
+                    // 竖缝要通到窗口顶。下半段那条由 MainContentView.sidebarColumnSplit 画,
+                    // 起点在顶栏下沿;顶栏这 32pt 得自己补上,否则整条分界线在 y=32 处断掉。
+                    // 只补「跟随侧栏」档 —— 「与顶栏同色」是有意做通栏,不该有这条缝。
+                    .overlay(alignment: .trailing) {
+                        if store.sidebarVisible {
+                            ChromeTheme.sidebarSplit(canvasBackground, hovering: splitHovering)
+                                .frame(width: 1)
+                        }
+                    }
                     .clipped()
             }
         }
