@@ -413,28 +413,33 @@ struct EditView: View {
         }
     }
 
+    @ViewBuilder
     private var undoCluster: some View {
-        HStack(spacing: 6) {
-            Divider().frame(height: 16)
+        // 撤销/重做都不可用时整组(含前导分隔线)隐藏:否则刚进编辑时
+        // 只剩一条孤线和一截空档悬在导出按钮左边,看起来像渲染残缺。
+        if !undoStack.isEmpty || !redoStack.isEmpty {
+            HStack(spacing: 6) {
+                Divider().frame(height: 16)
 
-            Button { undo() } label: {
-                Image(systemName: "chevron.uturn.backward")
-                    .font(.system(size: 12))
-                    .frame(width: 26, height: 22)
-                    .contentShape(Rectangle())
+                Button { undo() } label: {
+                    Image(systemName: "chevron.uturn.backward")
+                        .font(.system(size: 12))
+                        .frame(width: 26, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(undoStack.isEmpty)
+                .help("撤销 (⌘Z)")
+                Button { redo() } label: {
+                    Image(systemName: "chevron.uturn.forward")
+                        .font(.system(size: 12))
+                        .frame(width: 26, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(redoStack.isEmpty)
+                .help("重做 (⇧⌘Z)")
             }
-            .buttonStyle(.plain)
-            .disabled(undoStack.isEmpty)
-            .help("撤销 (⌘Z)")
-            Button { redo() } label: {
-                Image(systemName: "chevron.uturn.forward")
-                    .font(.system(size: 12))
-                    .frame(width: 26, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(redoStack.isEmpty)
-            .help("重做 (⇧⌘Z)")
         }
     }
 
