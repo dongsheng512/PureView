@@ -135,6 +135,8 @@ struct EditView: View {
     /// 窄窗口下工具选项收进弹层的开关
     @State private var showCompactOptions = false
     @State private var showExportPopover = false
+    /// 导出按钮 hover 态。必须是持久化的 State:声明在 label 闭包里的 @State 不工作。
+    @State private var exportMenuHovering = false
     @State private var holdingWindowLock = false
     @AppStorage(CanvasBackground.storageKey) private var canvasBackground = CanvasBackground.defaultValue
 
@@ -526,8 +528,6 @@ struct EditView: View {
                 .disabled(exporting || printPreparing || previewFailed)
         }
         label: {
-            // 与右侧 HeaderButton 同一玻璃语言:静止 = 素玻璃,hover 有反馈。
-            @State var hovering = false
             Text("导出")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(exportReady ? .primary : .secondary)
@@ -539,14 +539,14 @@ struct EditView: View {
                 )
                 .background {
                     AdaptiveButtonFill(
-                        emphasized: exportReady,
-                        hovering: hovering,
+                        emphasized: false,
+                        hovering: exportMenuHovering,
                         disabled: !exportReady,
                         cornerRadius: 5
                     )
                 }
                 .contentShape(Rectangle())
-                .onHover { hovering = $0 }
+                .onHover { exportMenuHovering = $0 }
         }
         // 纯按钮外观,点击任意处弹菜单(隐藏系统箭头指示器)
         .menuStyle(.button)
