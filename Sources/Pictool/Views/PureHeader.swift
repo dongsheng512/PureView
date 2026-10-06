@@ -146,20 +146,10 @@ struct PureHeader: View {
                 HeaderButton("rotate.right", help: "顺时针旋转 90°",
                              disabled: store.currentImage == nil) { store.requestRotate() }
             }
-            HeaderButton("square.and.pencil",
-                         help: store.isEditing ? "退出编辑" : "编辑,默认进入裁切 (C)",
-                         disabled: store.currentImage == nil,
-                         emphasized: store.isEditing) { store.toggleEditing() }
-            if !store.isEditing {
-                HeaderButton("printer", help: "打印 (⌘P)",
-                             disabled: store.currentImage == nil) { store.requestPrint() }
-            }
             if !store.isEditing {
                 HeaderButton("info.circle", help: "图片信息 (I)") {
                     store.showInspector.toggle()
                 }
-            }
-            if !store.isEditing {
                 HeaderButton(
                     store.isSlideshowActive && !store.isSlideshowPaused ? "pause.circle" : "play.circle",
                     help: store.isSlideshowActive && !store.isSlideshowPaused
@@ -167,6 +157,14 @@ struct PureHeader: View {
                         : "幻灯片播放 (空格)",
                     disabled: store.currentImage == nil || store.visibleImages.count < 2
                 ) { store.toggleSlideshow() }
+            }
+            HeaderButton("square.and.pencil",
+                         help: store.isEditing ? "退出编辑" : "编辑,默认进入裁切 (C)",
+                         disabled: store.currentImage == nil,
+                         emphasized: store.isEditing) { store.toggleEditing() }
+            if !store.isEditing {
+                HeaderButton("printer", help: "打印 (⌘P)",
+                             disabled: store.currentImage == nil) { store.requestPrint() }
                 HeaderDivider()
                 HeaderButton(
                     store.isImmersive ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
@@ -216,9 +214,45 @@ private struct HeaderButton: View {
         }
         .buttonStyle(.plain)
         .disabled(disabled)
+        .accessibilityLabel(help)
         .opacity(disabled ? 0.35 : 1)
-        .help(help)
         .onHover { hovering = $0 }
+        .overlay(alignment: .top) {
+            // 自绘 tooltip:系统 .help() 有 ~1.5s 延迟,这里 hover 立即显示。
+            // 挂在按钮上方偏移 —— 顶栏贴窗口顶,标签要往**下方**弹才可见。
+            if hovering, !disabled {
+                Text(help)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.primary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        TooltipBackground()
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                    )
+                    .fixedSize()
+                    .offset(y: 34)
+                    .transition(.opacity)
+                    .zIndex(10)
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// tooltip 底衬:26+ 系统玻璃,更早用厚实的深/浅材质,保证任何画布底色上可读。
+private struct TooltipBackground: View {
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Color.clear.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        } else {
+            Color(nsColor: .textBackgroundColor)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
     }
 }
 
