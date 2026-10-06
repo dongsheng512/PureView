@@ -156,7 +156,7 @@ struct PictoolApp: App {
                 Button("信息面板") { store.showInspector.toggle() }
                     .keyboardShortcut("i", modifiers: [])
                     .disabled(store.isModalPresented || textInputActive)
-                Button(store.isImmersive ? "退出只看图" : "只看图") {
+                Button(store.isImmersive ? "退出纯净模式" : "纯净模式") {
                     store.toggleImmersive()
                 }
                     .keyboardShortcut("f", modifiers: [])

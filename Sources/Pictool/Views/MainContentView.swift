@@ -366,7 +366,7 @@ struct MainContentView: View {
         .buttonStyle(.plain)
         // 材质与图标都跟画布走:不灌这一条,系统浅色 + 黑画布时就是"黑底上一块浅灰磨砂"
         .environment(\.colorScheme, canvasScheme)
-        .help("退出只看图 (Esc / F)")
+        .help("退出纯净模式 (Esc / F)")
         // 悬停按钮本体(28×22)也保持现身。现在按钮静止时是透明的,所以这条已经**不是**
         // 主路径 —— 真正唤出它的是右上角那块 240×120 热区(靠本地 mouseMoved 监视器,
         // 已由实机确认可用),热区远大于按钮本体,不存在点不到的死角。

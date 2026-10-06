@@ -158,17 +158,19 @@ struct PureHeader: View {
                     disabled: store.currentImage == nil || store.visibleImages.count < 2
                 ) { store.toggleSlideshow() }
             }
-            HeaderButton("square.and.pencil",
-                         help: store.isEditing ? "退出编辑" : "编辑,默认进入裁切 (C)",
-                         disabled: store.currentImage == nil,
-                         emphasized: store.isEditing) { store.toggleEditing() }
             if !store.isEditing {
                 HeaderButton("printer", help: "打印 (⌘P)",
                              disabled: store.currentImage == nil) { store.requestPrint() }
+            }
+            HeaderButton("square.and.pencil",
+                         help: "编辑图片",
+                         disabled: store.currentImage == nil,
+                         emphasized: store.isEditing) { store.toggleEditing() }
+            if !store.isEditing {
                 HeaderDivider()
                 HeaderButton(
                     store.isImmersive ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                    help: store.isImmersive ? "退出只看图 (Esc / F)" : "只看图,隐藏所有界面 (F)",
+                    help: store.isImmersive ? "退出纯净模式 (Esc / F)" : "纯净模式,隐藏所有界面 (F)",
                     disabled: store.currentImage == nil && !store.isImmersive
                 ) { store.toggleImmersive() }
             }
