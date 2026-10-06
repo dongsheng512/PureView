@@ -521,8 +521,7 @@ struct EditView: View {
                 .disabled(exporting || printPreparing || previewFailed)
         }
         label: {
-            // 与右侧 HeaderButton 同一玻璃语言:静止 = accent tint 玻璃,hover 有反馈。
-            // tintStrength 压到 0.45 —— 满强度在纯文字底下太蓝太重,与旁边的强调图标失衡。
+            // 与右侧 HeaderButton 同一玻璃语言:静止 = 素玻璃,hover 有反馈。
             @State var hovering = false
             Text("导出")
                 .font(.system(size: 12, weight: .medium))
@@ -538,8 +537,7 @@ struct EditView: View {
                         emphasized: exportReady,
                         hovering: hovering,
                         disabled: !exportReady,
-                        cornerRadius: 5,
-                        tintStrength: 0.45
+                        cornerRadius: 5
                     )
                 }
                 .contentShape(Rectangle())

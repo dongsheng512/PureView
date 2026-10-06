@@ -46,9 +46,6 @@ struct AdaptiveButtonFill: View {
     var hovering: Bool
     var disabled: Bool
     var cornerRadius: CGFloat
-    /// 强调玻璃的 tint 浓度。默认 0.45,与导出按钮一致 ——
-    /// 满强度 tint 在纯色内容底下读起来太重。
-    var tintStrength: CGFloat = 0.45
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: cornerRadius) }
 
@@ -68,12 +65,11 @@ struct AdaptiveButtonFill: View {
         }
     }
 
-    /// 选中 = 玻璃 + accent 色调;hover = 素玻璃。
+    /// 选中 = 素玻璃(无 tint,与整排按钮同一玻璃语言);hover = 素玻璃。
     @available(macOS 26.0, *)
     private var interactiveGlass: Glass {
         if emphasized {
-            let tint = Color.accentColor.opacity(tintStrength)
-            return .regular.tint(tint).interactive()
+            return .regular.interactive()
         }
         return .regular.interactive()
     }
