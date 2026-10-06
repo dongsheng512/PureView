@@ -54,9 +54,10 @@ struct AdaptiveButtonFill: View {
             if !disabled && (emphasized || hovering) {
                 Color.clear
                     .glassEffect(interactiveGlass, in: shape)
-                    // 玻璃自带的 rim 在 Menu label 里会被裁掉一段(导出按钮左缘缺一截),
-                    // 显式补一条画在形状内侧的完整描边,与系统 rim 观感一致。
-                    .overlay(shape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+                    // 玻璃自带的 rim 在 Menu label 里会被裁掉一段(导出按钮边缘缺一截),
+                    // 显式补一条画在形状内侧的完整描边。1pt:0.5pt 描边落在两物理像素
+                    // 之间会被稀释成一条淡线(右缘"消失"),加宽后任何相位下都连续。
+                    .overlay(shape.strokeBorder(Color.primary.opacity(0.07), lineWidth: 1))
             } else {
                 Color.clear
             }
