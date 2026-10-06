@@ -793,10 +793,7 @@ struct EditView: View {
                 cropChip(.custom, flex: true)
             }
             HStack(spacing: 4) {
-                directionChip(landscape: true, symbol: "rectangle.landscape.rotate",
-                              label: "横")
-                directionChip(landscape: false, symbol: "rectangle.portrait.rotate",
-                              label: "竖")
+                directionToggleChip
                 // 预设组:同一批位置,按方向映射到横版/竖版 case
                 ForEach(presetSlots, id: \.0) { slot in
                     cropChip(presetLandscape ? slot.1 : slot.1.flipped,
@@ -827,31 +824,37 @@ struct EditView: View {
         .frame(width: 280)
     }
 
-    /// 方向开关:横 ▭ / 竖 ▯。仅切换预设行映射,不直接改当前比例;
-    /// 当前比例若是与方向不符的预设,显示态会落到对向 case 上(值不变,不突变)。
-    private func directionChip(landscape: Bool, symbol: String, label: String) -> some View {
+    /// 方向切换按钮:横 ▭ / 竖 ▯ 合并为一个,点击在两者间切换。
+    /// 切换预设行映射;当前数字预设同步翻到对向,选区跟随新比值。
+    private func toggleDirection() {
+        guard let flipped = ratio.flippedAsPreset(from: presetLandscape, to: !presetLandscape) else {
+            presetLandscape.toggle()
+            return
+        }
+        pickRatio(flipped)
+        presetLandscape.toggle()
+    }
+
+    private var directionToggleChip: some View {
         Button {
-            guard presetLandscape != landscape else { return }
-            // 切换方向时把当前选中的数字预设同步翻到对向,选区跟随新比值;
-            // 模式档(自由/原始/自定义)不受方向影响。
-            if let flipped = ratio.flippedAsPreset(from: presetLandscape, to: landscape) {
-                pickRatio(flipped)
-            }
-            presetLandscape = landscape
+            toggleDirection()
         } label: {
             HStack(spacing: 3) {
-                Image(systemName: symbol).font(.system(size: 10, weight: .medium))
-                Text(label).font(.system(size: 11))
+                Image(systemName: presetLandscape
+                      ? "rectangle.landscape.rotate"
+                      : "rectangle.portrait.rotate")
+                    .font(.system(size: 10, weight: .medium))
+                Text(presetLandscape ? "横" : "竖").font(.system(size: 11))
             }
             .frame(minWidth: 34, minHeight: 22)
             .background {
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.primary.opacity(presetLandscape == landscape ? 0.16 : 0.05))
+                    .fill(Color.primary.opacity(0.05))
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(landscape ? "横版预设" : "竖版预设")
+        .help("切换横竖方向")
     }
 
     /// (槽位 ID, 横版 case)。竖版 = 横版.flipped,同一槽位语义稳定(第 2 槽永远是 4:3/3:4 家族)。
@@ -1932,14 +1935,19 @@ struct EditView: View {
         // 与拖动同一处换算:比例预设是像素空间的,选区是归一化坐标
         let imageAspect = transformedPixelSize.width / max(1, transformedPixelSize.height)
         let ratio = CropMath.normalizedAspect(aspect, imageAspect: imageAspect)
-        var width = selection.width
+
+        // 以「固定合适大小」为准,而不是在当前选区内接新比例 —— 旧逻辑以选区为基准,
+        // 选区形状是上一个比例的,每切一次就被新比例裁小一圈,越切越小。
+        // 这里固定取画布 84%(与右键「重置选框」同一尺度),比例适配后居中放置。
+        let scale: CGFloat = 0.84
+        var width = scale
         var height = width / ratio
-        if height > selection.height {
-            height = selection.height
+        if height > scale {
+            height = scale
             width = height * ratio
         }
-        let x = selection.midX - width / 2
-        let y = selection.midY - height / 2
+        let x = 0.5 - width / 2
+        let y = 0.5 - height / 2
         mutateSelection(CropMath.clampedNormalized(CGRect(x: x, y: y, width: width, height: height), minSize: 0.05))
     }
 
