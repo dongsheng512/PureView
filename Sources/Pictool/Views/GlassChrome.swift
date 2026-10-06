@@ -52,7 +52,11 @@ struct AdaptiveButtonFill: View {
     var body: some View {
         if #available(macOS 26.0, *) {
             if !disabled && (emphasized || hovering) {
-                Color.clear.glassEffect(interactiveGlass, in: shape)
+                Color.clear
+                    .glassEffect(interactiveGlass, in: shape)
+                    // 玻璃自带的 rim 在 Menu label 里会被裁掉一段(导出按钮左缘缺一截),
+                    // 显式补一条画在形状内侧的完整描边,与系统 rim 观感一致。
+                    .overlay(shape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
             } else {
                 Color.clear
             }
