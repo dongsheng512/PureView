@@ -311,13 +311,25 @@ struct EditView: View {
         }
     }
 
-    /// 右侧动作区。导出排在最后,贴住右侧导航组。
+    /// 右侧动作区。翻页在前,导出是唯一常驻玻璃的结束动作,关闭图标在顶栏最右。
     private var headerRightActions: some View {
         HStack(spacing: 6) {
             undoCluster
+            headerPageButtons
             exportMenu
         }
         .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// 编辑态的翻页。放在导出左边,和关闭图标分成「导航 | 结束编辑」两组。
+    private var headerPageButtons: some View {
+        HStack(spacing: 5) {
+            HeaderButton("chevron.left", help: "上一张 (←)",
+                         disabled: !store.canStep(-1)) { store.step(-1) }
+            HeaderButton("chevron.right", help: "下一张 (→)",
+                         disabled: !store.canStep(1)) { store.step(1) }
+            HeaderDivider()
+        }
     }
 
     /// 窄窗口下的选项入口:同一组控件收进弹层,不牺牲任何参数。
@@ -509,6 +521,17 @@ struct EditView: View {
         .help("退出编辑 (Esc)")
     }
 
+    private struct ExportTooltipBackground: View {
+        var body: some View {
+            if #available(macOS 26.0, *) {
+                Color.clear.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            } else {
+                Color(nsColor: .textBackgroundColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            }
+        }
+    }
+
     private var exportMenu: some View {
         Menu {
             Button("存储为…") {
@@ -530,31 +553,46 @@ struct EditView: View {
                 .disabled(exporting || printPreparing || previewFailed)
         }
         label: {
-            Text("导出")
-                .font(.system(size: 12, weight: .medium))
+            Image(systemName: "square.and.arrow.down")
+                .font(.system(size: 12))
                 .foregroundStyle(exportReady ? .primary : .secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(.clear)
-                )
+                .frame(width: 24, height: 20)
                 .background {
                     AdaptiveButtonFill(
                         emphasized: false,
                         hovering: exportMenuHovering,
                         disabled: !exportReady,
-                        cornerRadius: 5
+                        cornerRadius: 4
                     )
                 }
                 .contentShape(Rectangle())
                 .onHover { exportMenuHovering = $0 }
+                .accessibilityLabel("导出")
         }
         // 纯按钮外观,点击任意处弹菜单(隐藏系统箭头指示器)
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
+        .overlay(alignment: .topTrailing) {
+            // 挂在 Menu 外层,右对齐。按钮贴着工具条右缘,居中气泡会被裁掉。
+            if exportMenuHovering, exportReady {
+                Text("导出")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.primary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(ExportTooltipBackground())
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                    )
+                    .fixedSize()
+                    .offset(y: 34)
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.12), value: exportMenuHovering)
         .disabled(exporting || displayPreview == nil || previewFailed)
         .popover(isPresented: $showExportPopover, arrowEdge: .bottom) {
             ExportOptionsForm(

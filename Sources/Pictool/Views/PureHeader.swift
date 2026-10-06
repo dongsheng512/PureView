@@ -40,7 +40,9 @@ struct PureHeader: View {
                 // 也不能在它后面再挂 Spacer —— 两者会瓜分剩余宽度,导出就推不到最右。
                 editingToolbar
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .clipped()
+                    // 只裁水平溢出,避免窄窗口的工具条盖住右侧按钮。
+                    // 垂直方向留出悬停气泡,否则「导出」的提示会被裁掉。
+                    .clipShape(HeaderToolbarClip())
             } else {
                 Spacer()
             }
@@ -126,18 +128,23 @@ struct PureHeader: View {
 
     private var rightCluster: some View {
         HStack(spacing: 5) {
-            if !store.isEditing {
+            if store.isEditing {
+                // 翻页和导出在编辑工具条里组成「‹ › | 导出」。这里只留安静的退出图标,
+                // 贴在导出右侧;玻璃只在悬停时出现,避免和导出抢主按钮。
+                HeaderButton("xmark",
+                             help: "退出编辑 (Esc)",
+                             disabled: store.currentImage == nil,
+                             tooltipAlignsTrailing: true) { store.toggleEditing() }
+            } else {
                 HeaderButton("folder.badge.plus", help: "打开图片文件夹 (⌘O)") {
                     store.openFolderPanel()
                 }
                 HeaderDivider()
-            }
-            HeaderButton("chevron.left", help: "上一张 (←)",
-                         disabled: !store.canStep(-1)) { store.step(-1) }
-            HeaderButton("chevron.right", help: "下一张 (→)",
-                         disabled: !store.canStep(1)) { store.step(1) }
-            HeaderDivider()
-            if !store.isEditing {
+                HeaderButton("chevron.left", help: "上一张 (←)",
+                             disabled: !store.canStep(-1)) { store.step(-1) }
+                HeaderButton("chevron.right", help: "下一张 (→)",
+                             disabled: !store.canStep(1)) { store.step(1) }
+                HeaderDivider()
                 HeaderButton("minus.magnifyingglass", help: "缩小 (⌘-)",
                              disabled: store.currentImage == nil) { store.requestZoom(.zoomOut) }
                 HeaderButton("plus.magnifyingglass", help: "放大 (⌘=)",
@@ -145,8 +152,6 @@ struct PureHeader: View {
                 HeaderDivider()
                 HeaderButton("rotate.right", help: "顺时针旋转 90°",
                              disabled: store.currentImage == nil) { store.requestRotate() }
-            }
-            if !store.isEditing {
                 HeaderButton("info.circle", help: "图片信息 (I)") {
                     store.showInspector.toggle()
                 }
@@ -157,18 +162,11 @@ struct PureHeader: View {
                         : "幻灯片播放 (空格)",
                     disabled: store.currentImage == nil || store.visibleImages.count < 2
                 ) { store.toggleSlideshow() }
-            }
-            if !store.isEditing {
                 HeaderButton("printer", help: "打印 (⌘P)",
                              disabled: store.currentImage == nil) { store.requestPrint() }
-            }
-            // 编辑中这颗是最右按钮。悬停气泡贴右缘会被窗口遮罩切掉,文案直接写在按钮上。
-            HeaderButton("square.and.pencil",
-                         title: store.isEditing ? "退出编辑" : nil,
-                         help: store.isEditing ? "退出编辑" : "编辑图片",
-                         disabled: store.currentImage == nil,
-                         emphasized: store.isEditing) { store.toggleEditing() }
-            if !store.isEditing {
+                HeaderButton("square.and.pencil",
+                             help: "编辑图片",
+                             disabled: store.currentImage == nil) { store.toggleEditing() }
                 HeaderDivider()
                 HeaderButton(
                     store.isImmersive ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
@@ -181,9 +179,15 @@ struct PureHeader: View {
     }
 }
 
-private struct HeaderButton: View {
+/// 顶栏工具条的裁切:左右到边界,向下多留一截给 tooltip。
+private struct HeaderToolbarClip: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height + 56))
+    }
+}
+
+struct HeaderButton: View {
     let systemImage: String
-    var title: String? = nil
     let help: String
     var disabled = false
     var emphasized = false
@@ -192,11 +196,10 @@ private struct HeaderButton: View {
 
     @State private var hovering = false
 
-    init(_ systemImage: String, title: String? = nil, help: String, disabled: Bool = false,
+    init(_ systemImage: String, help: String, disabled: Bool = false,
          emphasized: Bool = false, tooltipAlignsTrailing: Bool = false,
          action: @escaping () -> Void) {
         self.systemImage = systemImage
-        self.title = title
         self.help = help
         self.disabled = disabled
         self.emphasized = emphasized
@@ -206,20 +209,10 @@ private struct HeaderButton: View {
 
     var body: some View {
         Button(action: action) {
-            Group {
-                if let title {
-                    Text(title)
-                        .font(.system(size: 12, weight: emphasized ? .semibold : .regular))
-                        .lineLimit(1)
-                        .padding(.horizontal, 7)
-                        .frame(height: 20)
-                } else {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 12, weight: emphasized ? .semibold : .regular))
-                        .frame(width: 24, height: 20)
-                }
-            }
-            .background {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: emphasized ? .semibold : .regular))
+                .frame(width: 24, height: 20)
+                .background {
                     // 选中态只用填充表达(macOS 工具栏范式):阴影语义是"抬升",和"按下"矛盾。
                     // 26 起底衬换成系统玻璃(选中与 hover 都是素玻璃、静止全透明),
                     // **图标占位仍然是 24×20 —— 顶栏不会被图标撑宽**。
@@ -240,8 +233,7 @@ private struct HeaderButton: View {
         .overlay(alignment: tooltipAlignsTrailing ? .topTrailing : .top) {
             // 自绘 tooltip:系统 .help() 有 ~1.5s 延迟,这里 hover 立即显示。
             // 挂在按钮上方偏移 —— 顶栏贴窗口顶,标签要往**下方**弹才可见。
-            // 按钮上已经写了同样的字时不再弹气泡,避免和可见文案重复、也被右缘切掉。
-            if hovering, !disabled, title == nil {
+            if hovering, !disabled {
                 Text(help)
                     .font(.system(size: 11))
                     .foregroundStyle(Color.primary)
@@ -277,7 +269,7 @@ private struct TooltipBackground: View {
     }
 }
 
-private struct HeaderDivider: View {
+struct HeaderDivider: View {
     var body: some View { Divider().frame(height: 13) }
 }
 
