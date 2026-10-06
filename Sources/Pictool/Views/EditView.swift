@@ -790,23 +790,19 @@ struct EditView: View {
                 .disabled(!ratio.supportsSwap)
                 .help("交换比例方向")
             }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 3),
-                      spacing: 4) {
-                ForEach(CropRatio.allCases) { r in
-                    Button { pickRatio(r) } label: {
-                        Text(r.rawValue)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 4)
-                            .background {
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(Color.primary.opacity(ratio == r ? 0.16 : 0.05))
-                            }
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
+            // 方案 A:模式(自由/原始/自定义)与横版预设分行排布。
+            // 竖版不再单独占位 —— 需要竖向时点右上角交换即可,选项数 10 → 8。
+            HStack(spacing: 4) {
+                cropModeChip(.free)
+                cropModeChip(.original)
+                cropModeChip(.custom)
+            }
+            HStack(spacing: 4) {
+                cropPresetChip(.square)
+                cropPresetChip(.fourBy3)
+                cropPresetChip(.threeBy2)
+                cropPresetChip(.sixteenBy9)
+                cropPresetChip(.fiveBy4)
             }
             if ratio == .custom { customRatioFields }
             HStack(spacing: 6) {
@@ -829,6 +825,32 @@ struct EditView: View {
         }
         .padding(10)
         .frame(width: 250)
+    }
+
+    /// 模式档:自由 / 原始 / 自定义,三等分。
+    private func cropModeChip(_ r: CropRatio) -> some View {
+        cropChip(r, minWidth: nil)
+    }
+
+    /// 横版预设档:五个等宽挤一行,数字型标签用等宽字体对齐。
+    private func cropPresetChip(_ r: CropRatio) -> some View {
+        cropChip(r, minWidth: 38)
+    }
+
+    private func cropChip(_ r: CropRatio, minWidth: CGFloat?) -> some View {
+        Button { pickRatio(r) } label: {
+            Text(r.rawValue)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: 22)
+                .background {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(ratio == r ? 0.16 : 0.05))
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(minWidth: minWidth)
     }
 
     private func pickRatio(_ r: CropRatio) {
