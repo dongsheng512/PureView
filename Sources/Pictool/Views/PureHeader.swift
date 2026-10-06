@@ -147,7 +147,7 @@ struct PureHeader: View {
                              disabled: store.currentImage == nil) { store.requestRotate() }
             }
             HeaderButton("square.and.pencil",
-                         help: store.isEditing ? "退出编辑" : "编辑 (D)",
+                         help: store.isEditing ? "退出编辑" : "编辑,默认进入裁切 (C)",
                          disabled: store.currentImage == nil,
                          emphasized: store.isEditing) { store.toggleEditing() }
             if !store.isEditing {

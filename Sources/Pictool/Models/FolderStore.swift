@@ -872,7 +872,8 @@ final class FolderStore {
         if isEditing {
             endEditing()
         } else {
-            beginEdit(tool: .text)
+            // 顶栏「编辑」按钮:默认落在裁切工具(最常用的第一步),标记类仍走「标记…」/D。
+            beginEdit(tool: .crop)
         }
     }
 
