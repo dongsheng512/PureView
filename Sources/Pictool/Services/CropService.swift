@@ -214,15 +214,8 @@ enum CropRatio: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 从 "4:3" 这类标签解析出 (w, h);解析不出返回 nil
-    var labelPair: (w: Int, h: Int)? {
-        let parts = rawValue.split(separator: ":")
-        guard parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) else { return nil }
-        return (w, h)
-    }
-
     /// 同比例翻转横竖后的预设(4:3 ↔ 3:4);非数字预设返回自身。
-    /// 方案 C 方向开关用它决定「点同一个位置」实际选中的 case。
+    /// 预设行用它决定同一槽位在竖向下选中哪个 case。
     var flipped: CropRatio {
         switch self {
         case .fourBy3: return .threeBy4
@@ -237,8 +230,9 @@ enum CropRatio: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 方案 C 方向开关:切换方向时当前选中值如何跟随。
+    /// 切换方向时当前选中值如何跟随。
     /// 数字预设翻到对向家族(4:3 → 3:4);模式档与 1:1 无方向,返回 nil 表示不动。
+    /// 自定义由调用方交换宽高字段,不走这里。
     func flippedAsPreset(from oldLandscape: Bool, to newLandscape: Bool) -> CropRatio? {
         guard oldLandscape != newLandscape else { return nil }
         switch self {

@@ -58,7 +58,7 @@ struct EditView: View {
     @State private var selection = CGRect(x: 0, y: 0, width: 1, height: 1)
     @State private var ratio: CropRatio = .free
     @State private var showCropPopover = false
-    /// 方案 C:预设行的方向开关。横 = 4:3/3:2/16:9/5:4,竖 = 3:4/2:3/9:16/4:5。
+    /// 预设行方向。横 = 4:3/3:2/16:9/5:4,竖 = 3:4/2:3/9:16/4:5。
     @State private var presetLandscape = true
     @State private var customW = "4"
     @State private var customH = "3"
@@ -785,19 +785,17 @@ struct EditView: View {
             HStack(spacing: 4) {
                 Text("比例").font(.caption).foregroundStyle(.secondary)
             }
-            // 方案 C:模式显式三档,方向显式开关,预设按方向显示一行。
-            // 竖版不再靠「记住另一个按钮」,同一个位置永远是当前方向的比值。
+            // 模式三档 + 方向开关。同一槽位永远是当前方向的比值,竖版不另记一颗按钮。
             HStack(spacing: 4) {
-                cropChip(.free, flex: true)
-                cropChip(.original, flex: true)
-                cropChip(.custom, flex: true)
+                cropChip(.free)
+                cropChip(.original)
+                cropChip(.custom)
             }
             HStack(spacing: 4) {
                 directionToggleChip
                 // 预设组:同一批位置,按方向映射到横版/竖版 case
                 ForEach(presetSlots, id: \.0) { slot in
-                    cropChip(presetLandscape ? slot.1 : slot.1.flipped,
-                             flex: true, mono: true)
+                    cropChip(presetLandscape ? slot.1 : slot.1.flipped, mono: true)
                 }
             }
             if ratio == .custom { customRatioFields }
@@ -824,9 +822,15 @@ struct EditView: View {
         .frame(width: 280)
     }
 
-    /// 方向切换按钮:横 ▭ / 竖 ▯ 合并为一个,点击在两者间切换。
-    /// 切换预设行映射;当前数字预设同步翻到对向,选区跟随新比值。
+    /// 方向切换:数字预设翻到对向 case;自定义没有对向 case,交换宽高字段。
+    /// 两种都走 snapToRatio,固定 84% 居中,避免在旧选区内越切越小。
     private func toggleDirection() {
+        if ratio == .custom {
+            swap(&customW, &customH)
+            presetLandscape.toggle()
+            snapToRatio()
+            return
+        }
         guard let flipped = ratio.flippedAsPreset(from: presetLandscape, to: !presetLandscape) else {
             presetLandscape.toggle()
             return
@@ -863,7 +867,7 @@ struct EditView: View {
         [("sq", .square), ("43", .fourBy3), ("32", .threeBy2), ("169", .sixteenBy9), ("54", .fiveBy4)]
     }
 
-    private func cropChip(_ r: CropRatio, flex: Bool, mono: Bool = false) -> some View {
+    private func cropChip(_ r: CropRatio, mono: Bool = false) -> some View {
         Button { pickRatio(r) } label: {
             Text(r.rawValue)
                 .font(mono ? .system(size: 11).monospacedDigit() : .system(size: 11))

@@ -75,7 +75,7 @@ final class FolderStore {
     }()
     /// 当前列表排序(偏好设置;列表变更时沿用)
     private(set) var sortPreference = ImageSortPreference.load()
-    /// 最近打开的文件夹(落盘,最多 8 条)
+    /// 最近打开的文件夹(落盘,最多 5 条)
     private(set) var recentFolders: [RecentFolders.Item] = RecentFolders.load()
 
     /// 单张/少量打开模式：默认不加载同目录所有图片，侧边提示按需加载
@@ -872,7 +872,6 @@ final class FolderStore {
         if isEditing {
             endEditing()
         } else {
-            // 顶栏「编辑」按钮:默认落在裁切工具(最常用的第一步),标记类仍走「标记…」/D。
             beginEdit(tool: .crop)
         }
     }

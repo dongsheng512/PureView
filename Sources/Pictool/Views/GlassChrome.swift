@@ -70,12 +70,9 @@ struct AdaptiveButtonFill: View {
         }
     }
 
-    /// 选中 = 素玻璃(无 tint,与整排按钮同一玻璃语言);hover = 素玻璃。
+    /// 选中与 hover 同一素玻璃。tint 会和整排按钮分成两套语言。
     @available(macOS 26.0, *)
     private var interactiveGlass: Glass {
-        if emphasized {
-            return .regular.interactive()
-        }
-        return .regular.interactive()
+        .regular.interactive()
     }
 }

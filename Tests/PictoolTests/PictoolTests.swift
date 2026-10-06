@@ -1233,6 +1233,32 @@ final class CropAspectSpaceTests: XCTestCase {
         // 自定义比例解析得出时应原样返回
         XCTAssertEqual(CropRatio.custom.aspect(imageAspect: imageAspect, customAspect: 2.5) ?? 0, 2.5)
     }
+
+    func testFlippedSwapsNumericPresetsOnce() {
+        XCTAssertEqual(CropRatio.fourBy3.flipped, .threeBy4)
+        XCTAssertEqual(CropRatio.threeBy4.flipped, .fourBy3)
+        XCTAssertEqual(CropRatio.sixteenBy9.flipped, .nineBy16)
+        XCTAssertEqual(CropRatio.nineBy16.flipped, .sixteenBy9)
+        XCTAssertEqual(CropRatio.threeBy2.flipped, .twoBy3)
+        XCTAssertEqual(CropRatio.twoBy3.flipped, .threeBy2)
+        XCTAssertEqual(CropRatio.fiveBy4.flipped, .fourBy5)
+        XCTAssertEqual(CropRatio.fourBy5.flipped, .fiveBy4)
+        XCTAssertEqual(CropRatio.square.flipped, .square)
+        XCTAssertEqual(CropRatio.free.flipped, .free)
+        XCTAssertEqual(CropRatio.original.flipped, .original)
+        XCTAssertEqual(CropRatio.custom.flipped, .custom)
+        XCTAssertEqual(CropRatio.fourBy3.flipped.flipped, .fourBy3)
+    }
+
+    func testFlippedAsPresetSkipsDirectionlessModes() {
+        XCTAssertEqual(CropRatio.fourBy3.flippedAsPreset(from: true, to: false), .threeBy4)
+        XCTAssertEqual(CropRatio.threeBy4.flippedAsPreset(from: false, to: true), .fourBy3)
+        XCTAssertNil(CropRatio.fourBy3.flippedAsPreset(from: true, to: true))
+        XCTAssertNil(CropRatio.square.flippedAsPreset(from: true, to: false))
+        XCTAssertNil(CropRatio.free.flippedAsPreset(from: true, to: false))
+        XCTAssertNil(CropRatio.original.flippedAsPreset(from: true, to: false))
+        XCTAssertNil(CropRatio.custom.flippedAsPreset(from: true, to: false))
+    }
 }
 
 final class MarkupGeometryTests: XCTestCase {

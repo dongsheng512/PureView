@@ -162,8 +162,10 @@ struct PureHeader: View {
                 HeaderButton("printer", help: "打印 (⌘P)",
                              disabled: store.currentImage == nil) { store.requestPrint() }
             }
+            // 编辑中这颗是最右按钮。悬停气泡贴右缘会被窗口遮罩切掉,文案直接写在按钮上。
             HeaderButton("square.and.pencil",
-                         help: "编辑图片",
+                         title: store.isEditing ? "退出编辑" : nil,
+                         help: store.isEditing ? "退出编辑" : "编辑图片",
                          disabled: store.currentImage == nil,
                          emphasized: store.isEditing) { store.toggleEditing() }
             if !store.isEditing {
@@ -181,6 +183,7 @@ struct PureHeader: View {
 
 private struct HeaderButton: View {
     let systemImage: String
+    var title: String? = nil
     let help: String
     var disabled = false
     var emphasized = false
@@ -189,10 +192,11 @@ private struct HeaderButton: View {
 
     @State private var hovering = false
 
-    init(_ systemImage: String, help: String, disabled: Bool = false,
+    init(_ systemImage: String, title: String? = nil, help: String, disabled: Bool = false,
          emphasized: Bool = false, tooltipAlignsTrailing: Bool = false,
          action: @escaping () -> Void) {
         self.systemImage = systemImage
+        self.title = title
         self.help = help
         self.disabled = disabled
         self.emphasized = emphasized
@@ -202,13 +206,23 @@ private struct HeaderButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 12, weight: emphasized ? .semibold : .regular))
-                .frame(width: 24, height: 20)
-                .background {
+            Group {
+                if let title {
+                    Text(title)
+                        .font(.system(size: 12, weight: emphasized ? .semibold : .regular))
+                        .lineLimit(1)
+                        .padding(.horizontal, 7)
+                        .frame(height: 20)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 12, weight: emphasized ? .semibold : .regular))
+                        .frame(width: 24, height: 20)
+                }
+            }
+            .background {
                     // 选中态只用填充表达(macOS 工具栏范式):阴影语义是"抬升",和"按下"矛盾。
-                    // 26 起底衬换成系统玻璃(选中叠 accent 色调、hover 素玻璃、静止全透明),
-                    // **占位仍然是 24×20 —— 顶栏不会被撑宽**。
+                    // 26 起底衬换成系统玻璃(选中与 hover 都是素玻璃、静止全透明),
+                    // **图标占位仍然是 24×20 —— 顶栏不会被图标撑宽**。
                     AdaptiveButtonFill(
                         emphasized: emphasized,
                         hovering: hovering,
@@ -226,7 +240,8 @@ private struct HeaderButton: View {
         .overlay(alignment: tooltipAlignsTrailing ? .topTrailing : .top) {
             // 自绘 tooltip:系统 .help() 有 ~1.5s 延迟,这里 hover 立即显示。
             // 挂在按钮上方偏移 —— 顶栏贴窗口顶,标签要往**下方**弹才可见。
-            if hovering, !disabled {
+            // 按钮上已经写了同样的字时不再弹气泡,避免和可见文案重复、也被右缘切掉。
+            if hovering, !disabled, title == nil {
                 Text(help)
                     .font(.system(size: 11))
                     .foregroundStyle(Color.primary)
