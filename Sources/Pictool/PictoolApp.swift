@@ -81,7 +81,7 @@ struct PictoolApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1024, height: 680)
+        .defaultSize(width: 960, height: 640)
         .handlesExternalEvents(matching: Set(arrayLiteral: "*"))
         .commands {
             CommandGroup(replacing: .newItem) {
