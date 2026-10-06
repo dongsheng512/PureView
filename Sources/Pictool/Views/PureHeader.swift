@@ -170,8 +170,9 @@ struct PureHeader: View {
                 HeaderDivider()
                 HeaderButton(
                     store.isImmersive ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                    help: store.isImmersive ? "退出纯净模式 (Esc / F)" : "纯净模式,隐藏所有界面 (F)",
-                    disabled: store.currentImage == nil && !store.isImmersive
+                    help: store.isImmersive ? "退出纯净模式" : "纯净模式",
+                    disabled: store.currentImage == nil && !store.isImmersive,
+                    tooltipAlignsTrailing: true
                 ) { store.toggleImmersive() }
             }
         }
@@ -183,16 +184,19 @@ private struct HeaderButton: View {
     let help: String
     var disabled = false
     var emphasized = false
+    var tooltipAlignsTrailing = false
     let action: () -> Void
 
     @State private var hovering = false
 
     init(_ systemImage: String, help: String, disabled: Bool = false,
-         emphasized: Bool = false, action: @escaping () -> Void) {
+         emphasized: Bool = false, tooltipAlignsTrailing: Bool = false,
+         action: @escaping () -> Void) {
         self.systemImage = systemImage
         self.help = help
         self.disabled = disabled
         self.emphasized = emphasized
+        self.tooltipAlignsTrailing = tooltipAlignsTrailing
         self.action = action
     }
 
@@ -219,7 +223,7 @@ private struct HeaderButton: View {
         .accessibilityLabel(help)
         .opacity(disabled ? 0.35 : 1)
         .onHover { hovering = $0 }
-        .overlay(alignment: .top) {
+        .overlay(alignment: tooltipAlignsTrailing ? .topTrailing : .top) {
             // 自绘 tooltip:系统 .help() 有 ~1.5s 延迟,这里 hover 立即显示。
             // 挂在按钮上方偏移 —— 顶栏贴窗口顶,标签要往**下方**弹才可见。
             if hovering, !disabled {
