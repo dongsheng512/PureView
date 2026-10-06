@@ -42,7 +42,7 @@ struct ThumbnailGridView: View {
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
-                    .foregroundStyle(Color.pvAccent)
+                    .foregroundStyle(Color.accentColor)
                     .help("显示被隐藏的图片,或全部恢复")
                 }
                 Image(systemName: expanded ? "chevron.down" : "chevron.up")
@@ -263,7 +263,7 @@ struct ThumbCell: View {
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(isCurrent ? Color.pvAccent : .clear, lineWidth: 2.5)
+                    .strokeBorder(isCurrent ? Color.accentColor : .clear, lineWidth: 2.5)
             )
 
             Text(file.name)
@@ -275,7 +275,7 @@ struct ThumbCell: View {
         .padding(5)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(isCurrent ? Color.pvAccent.opacity(0.15) : Color.clear)
+                .fill(isCurrent ? Color.accentColor.opacity(0.15) : Color.clear)
         )
         .contentShape(Rectangle())
         .task(id: file.id) {

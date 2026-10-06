@@ -477,7 +477,7 @@ struct EditView: View {
                     ? "text.below.photo.fill" : "text.below.photo")
                 .font(.system(size: 12))
                 .foregroundStyle(watermarkDraft.enabled && watermarkDraft.hasContent
-                                 ? Color.pvAccent : Color.primary)
+                                 ? Color.accentColor : Color.primary)
                 // 高度跟工具按钮对齐(22 而非 24),否则在 HStack 里高出一截
                 .frame(width: 26, height: 22)
                 .contentShape(Rectangle())
@@ -681,7 +681,7 @@ struct EditView: View {
             .background {
                 if tool == t {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.pvAccent.opacity(0.18))
+                        .fill(Color.accentColor.opacity(0.18))
                 }
             }
             .contentShape(Rectangle())
@@ -744,7 +744,7 @@ struct EditView: View {
                                     .frame(width: swatch, height: swatch)
                                     .overlay(
                                         Circle().strokeBorder(
-                                            markupColor == .palette(i) ? Color.pvAccent : Color.secondary.opacity(0.35),
+                                            markupColor == .palette(i) ? Color.accentColor : Color.secondary.opacity(0.35),
                                             lineWidth: markupColor == .palette(i) ? 2 : 0.5
                                         )
                                     )
@@ -2693,7 +2693,7 @@ private struct MarkupCanvas: View {
                 Rectangle()
                     .strokeBorder(Color.white.opacity(0.85), lineWidth: 2.2)
                 Rectangle()
-                    .strokeBorder(Color.pvAccent, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
             .frame(width: cropBox.width, height: cropBox.height)
             .offset(x: cropBox.minX, y: cropBox.minY)
@@ -2725,7 +2725,7 @@ private struct MarkupCanvas: View {
                 Rectangle()
                     .strokeBorder(Color.white.opacity(0.85), lineWidth: 2.2)
                 Rectangle()
-                    .strokeBorder(Color.pvAccent, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
             .frame(width: bounds.width, height: bounds.height)
             .position(x: bounds.midX, y: bounds.midY)

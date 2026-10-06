@@ -167,7 +167,7 @@ struct MainContentView: View {
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.pvAccent, lineWidth: 3)
+                    .strokeBorder(Color.accentColor, lineWidth: 3)
                     .padding(6)
                     .allowsHitTesting(false)
             }
@@ -765,7 +765,7 @@ struct MainContentView: View {
             }
             .buttonStyle(.plain)
             .background(
-                hovering ? Color.pvAccent.opacity(0.18) : Color.clear,
+                hovering ? Color.accentColor.opacity(0.18) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 4)
             )
             .onHover { hovering = $0 }

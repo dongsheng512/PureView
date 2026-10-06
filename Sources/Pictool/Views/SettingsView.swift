@@ -186,7 +186,7 @@ private struct WatermarkPositionGrid: View {
                     ForEach(0..<3, id: \.self) { col in
                         let item = WatermarkPosition.allCases[row * 3 + col]
                         RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(position == item ? Color.pvAccent : Color.primary.opacity(0.14))
+                            .fill(position == item ? Color.accentColor : Color.primary.opacity(0.14))
                             .frame(width: 16, height: 16)
                             .contentShape(Rectangle())
                             .onTapGesture {

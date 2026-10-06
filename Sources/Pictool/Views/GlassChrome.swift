@@ -1,10 +1,5 @@
 import SwiftUI
 
-/// 品牌 accent 色:偏青的蓝(≠ 系统蓝),比默认蓝更柔和,选中环/强调玻璃/链接色全走这里。
-extension Color {
-    static let pvAccent = Color(red: 0x22 / 255, green: 0x7E / 255, blue: 0xA3 / 255)
-}
-
 /// 浮层底衬。26+ 用 `glassEffect`(在 SwiftUICore,不描边);更早仍是材质 + 描边 + 阴影。几何由调用点决定。
 struct AdaptiveGlassSurface<S: InsettableShape>: View {
     var shape: S
@@ -67,7 +62,7 @@ struct AdaptiveButtonFill: View {
         } else {
             shape.fill(
                 emphasized
-                    ? Color.pvAccent.opacity(0.18)
+                    ? Color.accentColor.opacity(0.18)
                     : (hovering && !disabled ? Color.primary.opacity(0.08) : Color.clear)
             )
         }
@@ -77,7 +72,7 @@ struct AdaptiveButtonFill: View {
     @available(macOS 26.0, *)
     private var interactiveGlass: Glass {
         if emphasized {
-            let tint = Color.pvAccent.opacity(tintStrength)
+            let tint = Color.accentColor.opacity(tintStrength)
             return .regular.tint(tint).interactive()
         }
         return .regular.interactive()
