@@ -2011,7 +2011,7 @@ final class RecentFoldersTests: XCTestCase {
         }
         XCTAssertEqual(items.count, RecentFolders.maxCount)
         XCTAssertEqual(items.first?.url, RecentFolders.canonical(urls[9]))
-        XCTAssertEqual(items.last?.url, RecentFolders.canonical(urls[2]))
+        XCTAssertEqual(items.last?.url, RecentFolders.canonical(urls[10 - RecentFolders.maxCount]))
 
         items = RecentFolders.inserting(urls[2], into: items)
         XCTAssertEqual(items.count, RecentFolders.maxCount)

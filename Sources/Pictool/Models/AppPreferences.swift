@@ -146,10 +146,10 @@ enum SidebarTopStyle: String, CaseIterable, Identifiable {
     }
 }
 
-/// 最近打开的文件夹。UserDefaults 存书签 Data + path 回退,最多 8 条。
+/// 最近打开的文件夹。UserDefaults 存书签 Data + path 回退,最多 5 条。
 enum RecentFolders {
     static let storageKey = "recentFolders"
-    static let maxCount = 8
+    static let maxCount = 5
 
     struct Item: Equatable, Identifiable, Sendable {
         var url: URL
