@@ -98,7 +98,7 @@ struct SidebarView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .tint(Color.accentColor)
+            .tint(Color.pvAccent)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -275,7 +275,7 @@ struct FolderTreeRow: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: node.depth == 0 ? "folder.fill" : "folder")
-                    .foregroundStyle(node.depth == 0 ? Color.accentColor : .secondary)
+                    .foregroundStyle(node.depth == 0 ? Color.pvAccent : .secondary)
                 Text(node.name)
                     .lineLimit(1)
                     .truncationMode(.middle)

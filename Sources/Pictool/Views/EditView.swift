@@ -477,7 +477,7 @@ struct EditView: View {
                     ? "text.below.photo.fill" : "text.below.photo")
                 .font(.system(size: 12))
                 .foregroundStyle(watermarkDraft.enabled && watermarkDraft.hasContent
-                                 ? Color.accentColor : Color.primary)
+                                 ? Color.pvAccent : Color.primary)
                 // 高度跟工具按钮对齐(22 而非 24),否则在 HStack 里高出一截
                 .frame(width: 26, height: 22)
                 .contentShape(Rectangle())
@@ -521,16 +521,29 @@ struct EditView: View {
                 .disabled(exporting || printPreparing || previewFailed)
         }
         label: {
+            // 与右侧 HeaderButton 同一玻璃语言:静止 = accent tint 玻璃,hover 有反馈。
+            // tintStrength 压到 0.45 —— 满强度在纯文字底下太蓝太重,与旁边的强调图标失衡。
+            @State var hovering = false
             Text("导出")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(exportReady ? 1 : 0.65))
+                .foregroundStyle(exportReady ? .primary : .secondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.accentColor.opacity(exportReady ? 1 : 0.4))
+                        .fill(.clear)
                 )
+                .background {
+                    AdaptiveButtonFill(
+                        emphasized: exportReady,
+                        hovering: hovering,
+                        disabled: !exportReady,
+                        cornerRadius: 5,
+                        tintStrength: 0.45
+                    )
+                }
                 .contentShape(Rectangle())
+                .onHover { hovering = $0 }
         }
         // 纯按钮外观,点击任意处弹菜单(隐藏系统箭头指示器)
         .menuStyle(.button)
@@ -668,7 +681,7 @@ struct EditView: View {
             .background {
                 if tool == t {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.18))
+                        .fill(Color.pvAccent.opacity(0.18))
                 }
             }
             .contentShape(Rectangle())
@@ -731,7 +744,7 @@ struct EditView: View {
                                     .frame(width: swatch, height: swatch)
                                     .overlay(
                                         Circle().strokeBorder(
-                                            markupColor == .palette(i) ? Color.accentColor : Color.secondary.opacity(0.35),
+                                            markupColor == .palette(i) ? Color.pvAccent : Color.secondary.opacity(0.35),
                                             lineWidth: markupColor == .palette(i) ? 2 : 0.5
                                         )
                                     )
@@ -2680,7 +2693,7 @@ private struct MarkupCanvas: View {
                 Rectangle()
                     .strokeBorder(Color.white.opacity(0.85), lineWidth: 2.2)
                 Rectangle()
-                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    .strokeBorder(Color.pvAccent, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
             .frame(width: cropBox.width, height: cropBox.height)
             .offset(x: cropBox.minX, y: cropBox.minY)
@@ -2712,7 +2725,7 @@ private struct MarkupCanvas: View {
                 Rectangle()
                     .strokeBorder(Color.white.opacity(0.85), lineWidth: 2.2)
                 Rectangle()
-                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    .strokeBorder(Color.pvAccent, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
             .frame(width: bounds.width, height: bounds.height)
             .position(x: bounds.midX, y: bounds.midY)

@@ -127,7 +127,7 @@ struct CropCanvas: View {
                         Rectangle()
                             .strokeBorder(Color.white.opacity(0.85), lineWidth: 2.2)
                         Rectangle()
-                            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            .strokeBorder(Color.pvAccent, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                     }
                     .frame(width: box.width, height: box.height)
                     .position(x: box.midX, y: box.midY)

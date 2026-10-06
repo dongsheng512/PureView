@@ -63,6 +63,7 @@ struct PictoolApp: App {
             MainContentView()
                 .environment(store)
                 .environment(annotations)
+                .tint(Color.pvAccent)
                 .ignoresSafeArea(.container, edges: .top)
                 .onAppear { delegate.store = store }
                 .onReceive(NotificationCenter.default.publisher(for: .openExternalURLs)) { note in
@@ -206,6 +207,7 @@ struct PictoolApp: App {
         }
         Settings {
             SettingsView()
+                .tint(Color.pvAccent)
         }
     }
 }
