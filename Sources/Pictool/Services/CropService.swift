@@ -188,7 +188,9 @@ enum CropRatio: String, CaseIterable, Identifiable {
     case sixteenBy9 = "16:9"
     case nineBy16 = "9:16"
     case threeBy2 = "3:2"
+    case twoBy3 = "2:3"
     case fiveBy4 = "5:4"
+    case fourBy5 = "4:5"
     case custom = "自定义"
     var id: String { rawValue }
 
@@ -205,16 +207,10 @@ enum CropRatio: String, CaseIterable, Identifiable {
         case .sixteenBy9: return 16.0 / 9.0
         case .nineBy16: return 9.0 / 16.0
         case .threeBy2: return 3.0 / 2.0
+        case .twoBy3: return 2.0 / 3.0
         case .fiveBy4: return 5.0 / 4.0
+        case .fourBy5: return 4.0 / 5.0
         case .custom: return customAspect
-        }
-    }
-
-    /// 预设比例能否交换横竖(自由/原始/1:1 无意义)
-    var supportsSwap: Bool {
-        switch self {
-        case .free, .original, .square: return false
-        default: return true
         }
     }
 
@@ -223,6 +219,32 @@ enum CropRatio: String, CaseIterable, Identifiable {
         let parts = rawValue.split(separator: ":")
         guard parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) else { return nil }
         return (w, h)
+    }
+
+    /// 同比例翻转横竖后的预设(4:3 ↔ 3:4);非数字预设返回自身。
+    /// 方案 C 方向开关用它决定「点同一个位置」实际选中的 case。
+    var flipped: CropRatio {
+        switch self {
+        case .fourBy3: return .threeBy4
+        case .threeBy4: return .fourBy3
+        case .sixteenBy9: return .nineBy16
+        case .nineBy16: return .sixteenBy9
+        case .threeBy2: return .twoBy3
+        case .twoBy3: return .threeBy2
+        case .fiveBy4: return .fourBy5
+        case .fourBy5: return .fiveBy4
+        default: return self
+        }
+    }
+
+    /// 方案 C 方向开关:切换方向时当前选中值如何跟随。
+    /// 数字预设翻到对向家族(4:3 → 3:4);模式档与 1:1 无方向,返回 nil 表示不动。
+    func flippedAsPreset(from oldLandscape: Bool, to newLandscape: Bool) -> CropRatio? {
+        guard oldLandscape != newLandscape else { return nil }
+        switch self {
+        case .square, .free, .original, .custom: return nil
+        default: return flipped
+        }
     }
 }
 

@@ -58,6 +58,8 @@ struct EditView: View {
     @State private var selection = CGRect(x: 0, y: 0, width: 1, height: 1)
     @State private var ratio: CropRatio = .free
     @State private var showCropPopover = false
+    /// 方案 C:预设行的方向开关。横 = 4:3/3:2/16:9/5:4,竖 = 3:4/2:3/9:16/4:5。
+    @State private var presetLandscape = true
     @State private var customW = "4"
     @State private var customH = "3"
     @FocusState private var editingCustomRatio: Bool
@@ -782,27 +784,24 @@ struct EditView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 4) {
                 Text("比例").font(.caption).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                Button { swapRatio() } label: {
-                    Image(systemName: "arrow.left.arrow.right").font(.system(size: 11))
+            }
+            // 方案 C:模式显式三档,方向显式开关,预设按方向显示一行。
+            // 竖版不再靠「记住另一个按钮」,同一个位置永远是当前方向的比值。
+            HStack(spacing: 4) {
+                cropChip(.free, flex: true)
+                cropChip(.original, flex: true)
+                cropChip(.custom, flex: true)
+            }
+            HStack(spacing: 4) {
+                directionChip(landscape: true, symbol: "rectangle.landscape.rotate",
+                              label: "横")
+                directionChip(landscape: false, symbol: "rectangle.portrait.rotate",
+                              label: "竖")
+                // 预设组:同一批位置,按方向映射到横版/竖版 case
+                ForEach(presetSlots, id: \.0) { slot in
+                    cropChip(presetLandscape ? slot.1 : slot.1.flipped,
+                             flex: true, mono: true)
                 }
-                .buttonStyle(.plain)
-                .disabled(!ratio.supportsSwap)
-                .help("交换比例方向")
-            }
-            // 方案 A:模式(自由/原始/自定义)与横版预设分行排布。
-            // 竖版不再单独占位 —— 需要竖向时点右上角交换即可,选项数 10 → 8。
-            HStack(spacing: 4) {
-                cropModeChip(.free)
-                cropModeChip(.original)
-                cropModeChip(.custom)
-            }
-            HStack(spacing: 4) {
-                cropPresetChip(.square)
-                cropPresetChip(.fourBy3)
-                cropPresetChip(.threeBy2)
-                cropPresetChip(.sixteenBy9)
-                cropPresetChip(.fiveBy4)
             }
             if ratio == .custom { customRatioFields }
             HStack(spacing: 6) {
@@ -824,23 +823,47 @@ struct EditView: View {
             }
         }
         .padding(10)
-        .frame(width: 250)
+        // 方向开关 + 5 个预设挤一行,250pt 时预设被压得太窄,加宽到 280。
+        .frame(width: 280)
     }
 
-    /// 模式档:自由 / 原始 / 自定义,三等分。
-    private func cropModeChip(_ r: CropRatio) -> some View {
-        cropChip(r, minWidth: nil)
+    /// 方向开关:横 ▭ / 竖 ▯。仅切换预设行映射,不直接改当前比例;
+    /// 当前比例若是与方向不符的预设,显示态会落到对向 case 上(值不变,不突变)。
+    private func directionChip(landscape: Bool, symbol: String, label: String) -> some View {
+        Button {
+            guard presetLandscape != landscape else { return }
+            // 切换方向时把当前选中的数字预设同步翻到对向,选区跟随新比值;
+            // 模式档(自由/原始/自定义)不受方向影响。
+            if let flipped = ratio.flippedAsPreset(from: presetLandscape, to: landscape) {
+                pickRatio(flipped)
+            }
+            presetLandscape = landscape
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 10, weight: .medium))
+                Text(label).font(.system(size: 11))
+            }
+            .frame(minWidth: 34, minHeight: 22)
+            .background {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(presetLandscape == landscape ? 0.16 : 0.05))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(landscape ? "横版预设" : "竖版预设")
     }
 
-    /// 横版预设档:五个等宽挤一行,数字型标签用等宽字体对齐。
-    private func cropPresetChip(_ r: CropRatio) -> some View {
-        cropChip(r, minWidth: 38)
+    /// (槽位 ID, 横版 case)。竖版 = 横版.flipped,同一槽位语义稳定(第 2 槽永远是 4:3/3:4 家族)。
+    /// ID 必须唯一 —— 空字符串会让 ForEach 把五个槽合并成一个,全部渲染成 1:1。
+    private var presetSlots: [(String, CropRatio)] {
+        [("sq", .square), ("43", .fourBy3), ("32", .threeBy2), ("169", .sixteenBy9), ("54", .fiveBy4)]
     }
 
-    private func cropChip(_ r: CropRatio, minWidth: CGFloat?) -> some View {
+    private func cropChip(_ r: CropRatio, flex: Bool, mono: Bool = false) -> some View {
         Button { pickRatio(r) } label: {
             Text(r.rawValue)
-                .font(.system(size: 11))
+                .font(mono ? .system(size: 11).monospacedDigit() : .system(size: 11))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, minHeight: 22)
                 .background {
@@ -850,7 +873,6 @@ struct EditView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .frame(minWidth: minWidth)
     }
 
     private func pickRatio(_ r: CropRatio) {
@@ -1903,17 +1925,6 @@ struct EditView: View {
                         anchor: CGPoint(x: canvasContainerSize.width / 2,
                                         y: canvasContainerSize.height / 2),
                         container: canvasContainerSize)
-    }
-
-    private func swapRatio() {        guard ratio.supportsSwap else { return }
-        if ratio == .custom {
-            let w = customW; customW = customH; customH = w
-        } else if let pair = ratio.labelPair {
-            customW = "\(pair.h)"
-            customH = "\(pair.w)"
-            ratio = .custom
-        }
-        snapToRatio()
     }
 
     private func snapToRatio() {
