@@ -1,4 +1,51 @@
+import CoreGraphics
 import Foundation
+
+/// 左右切图、点缩略图时的过渡。默认交叠滑移;淡入是原先的单层效果。
+enum ImageTransitionStyle: String, CaseIterable, Identifiable {
+    /// 新图不透明短滑入,旧图停在原位淡出。无方向时只交叉淡化。
+    case slide
+    /// 新图从透明淡入,并沿方向滑 24pt。
+    case fade
+
+    static let storageKey = "imageTransitionStyle"
+    static let defaultValue = ImageTransitionStyle.slide
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .slide: "交叠滑移"
+        case .fade: "淡入"
+        }
+    }
+}
+
+/// 交叠滑移的时长与位移。纯函数,方便单测。
+enum ImageHandoff {
+    /// 有方向 160ms,无方向交叉淡化 140ms。上一段还没放完时缩短到 80ms。
+    static func duration(direction: Int, rapid: Bool) -> TimeInterval {
+        if rapid { return 0.08 }
+        return direction == 0 ? 0.14 : 0.16
+    }
+
+    /// 视口宽度的 8%,对齐到物理像素。半像素位移会在滑开的那一侧留一条深边。无方向不滑。
+    static func travel(direction: Int, viewportWidth: CGFloat, backing: CGFloat = 1) -> CGFloat {
+        guard direction != 0, viewportWidth > 0 else { return 0 }
+        let scale = backing > 0 ? backing : 1
+        return (viewportWidth * 0.08 * scale).rounded() / scale
+    }
+
+    /// 换图会改 clip 的 bounds.origin。把旧图 frame 换算到新 origin 下,屏幕位置不变。
+    static func parkedFrame(oldImageFrame: CGRect, oldBoundsOrigin: CGPoint, newBoundsOrigin: CGPoint) -> CGRect {
+        CGRect(
+            x: oldImageFrame.origin.x - oldBoundsOrigin.x + newBoundsOrigin.x,
+            y: oldImageFrame.origin.y - oldBoundsOrigin.y + newBoundsOrigin.y,
+            width: oldImageFrame.width,
+            height: oldImageFrame.height
+        )
+    }
+}
 
 /// 打开新图时的默认缩放
 enum OpenZoomMode: String, CaseIterable, Identifiable {

@@ -8,6 +8,10 @@ struct MainContentView: View {
 
     @Environment(FolderStore.self) private var store
     @State private var isPreparingPrint = false
+    /// 取消准备时递增,进行中的解码结果直接丢掉。
+    @State private var printGeneration = 0
+    @State private var contactSheetGeneration = 0
+    @State private var printError: String?
     // 拼版打印:选项弹层 + 解码期间的门禁(与 isPreparingPrint 分开,
     // 因为它还要在弹层里禁按钮)
     @State private var showContactSheetOptions = false
@@ -24,6 +28,7 @@ struct MainContentView: View {
     @AppStorage(ImageSortKey.storageKey) private var sortKey = ImageSortKey.defaultValue
     @AppStorage(ImageSortDirection.storageKey) private var sortDirection = ImageSortDirection.defaultValue
     @AppStorage(SlideShowInterval.storageKey) private var slideshowInterval = SlideShowInterval.defaultValue
+    @AppStorage(ImageTransitionStyle.storageKey) private var imageTransition = ImageTransitionStyle.defaultValue
     // 幻灯片控制条:**只在幻灯片会话里存在**。会话开始浮现一次,静止 2.5 秒淡出,
     // 悬停在它上面时保持;不播放时鼠标扫过底边一概不弹(纯净模式就该是一张图)。
     @State private var slideshowHUDVisible = false
@@ -147,21 +152,31 @@ struct MainContentView: View {
             handleDrop(providers)
         }
         .overlay {
-            ZStack {
-                if isPreparingPrint {
+            if isPreparingPrint || contactSheetPreparing {
+                VStack(spacing: 8) {
                     ProgressView("正在准备打印…")
-                        .padding(14)
-                        // 加深色画布上也要能看清,给进度条一层底材(26 起是系统玻璃)。
-                        // 原来就没有描边与投影,所以这里都不加。
-                        .background {
-                            AdaptiveGlassSurface(
-                                shape: RoundedRectangle(cornerRadius: 10),
-                                legacyStroke: nil,
-                                shadowOpacity: 0
-                            )
-                        }
+                    Button("取消") { cancelPrintPreparation() }
+                        .controlSize(.small)
+                }
+                .padding(14)
+                // 加深色画布上也要能看清,给进度条一层底材(26 起是系统玻璃)。
+                // 原来就没有描边与投影,所以这里都不加。
+                .background {
+                    AdaptiveGlassSurface(
+                        shape: RoundedRectangle(cornerRadius: 10),
+                        legacyStroke: nil,
+                        shadowOpacity: 0
+                    )
                 }
             }
+        }
+        .alert("无法打印", isPresented: Binding(
+            get: { printError != nil },
+            set: { if !$0 { printError = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(printError ?? "")
         }
         // 拖入高亮:此前 isTargeted 传的是 nil,用户拖着文件进来没有任何反馈
         .overlay {
@@ -197,6 +212,7 @@ struct MainContentView: View {
                 neighborURLs: store.neighborURLs,
                 background: canvasBackground,
                 openZoomMode: openZoomMode,
+                transition: imageTransition,
                 zoomRequest: store.zoomRequest,
                 rotationCount: store.rotationCount,
                 stepDirection: store.lastStepDirection,
@@ -517,21 +533,25 @@ struct MainContentView: View {
 
         contactSheetPreparing = true
         store.isModalPresented = true
+        contactSheetGeneration += 1
+        let generation = contactSheetGeneration
         // 缩略图必须按格子的实际像素尺寸下单(几百 px),绝不能解全尺寸——
         // 20 张 24MP 拼版会瞬间吃掉几百 MB。
         let maxPixel = PrintService.contactSheetMetrics(options: options,
                                                         imageCount: sources.count).thumbnailMaxPixel
         Task {
             let loaded = await ContactSheetImageLoader.load(sources, maxPixel: maxPixel)
+            guard generation == contactSheetGeneration else { return }
             // 解不出来的图直接略过,不占格子,免得版面上出现空框。
             let items = loaded.compactMap { $0 }
             contactSheetPreparing = false
             store.isModalPresented = false
-            guard !items.isEmpty else { return }
-            await MainActor.run {
-                PrintService.print(contactSheet: items, options: options)
-                store.isModalPresented = false
+            guard !items.isEmpty else {
+                printError = "这些图片都无法打开,不能拼版打印。"
+                return
             }
+            PrintService.print(contactSheet: items, options: options)
+            store.isModalPresented = false
         }
     }
 
@@ -539,23 +559,35 @@ struct MainContentView: View {
         guard let file = store.currentImage, !isPreparingPrint else { return }
         isPreparingPrint = true
         store.isModalPresented = true
+        printGeneration += 1
+        let generation = printGeneration
         let url = file.url
+        // 长边按当前纸张的 300dpi 算。A4 约 3500px,小相纸更少,多出来的像素进不了纸。
+        let maxPixel = PrintPageView.printMaxPixel(paperSize: NSPrintInfo.shared.paperSize)
         Task {
-            // 打印按纸张分辨率限解码尺寸即可:300dpi 的 A4 满打满算约 3508px 长边,
-            // 再多的像素进不了纸。限住后大图解码从秒级降到毫秒级,不会一直转圈。
-            let printMaxPixel: CGFloat = 3600
-            let image = await Task.detached(priority: .userInitiated) {
-                try? ImageLoader.decode(url: url, maxPixelSize: printMaxPixel)
+            let decoded = await Task.detached(priority: .userInitiated) { () -> Result<NSImage, Error> in
+                Result { try ImageLoader.decode(url: url, maxPixelSize: maxPixel) }
             }.value
+            guard generation == printGeneration else { return }
             isPreparingPrint = false
-            // 打印面板是模态的,从 runModal 返回即代表已关闭
+            // 打印面板是模态的,从 runModal 返回即代表已关闭。
             store.isModalPresented = false
-            guard let image else { return }
-            await MainActor.run {
+            switch decoded {
+            case .failure(let error):
+                printError = error.localizedDescription
+            case .success(let image):
                 PrintService.print(image: image)
                 store.isModalPresented = false
             }
         }
+    }
+
+    private func cancelPrintPreparation() {
+        printGeneration += 1
+        contactSheetGeneration += 1
+        isPreparingPrint = false
+        contactSheetPreparing = false
+        store.isModalPresented = false
     }
 
     // MARK: 详情区
@@ -580,6 +612,7 @@ struct MainContentView: View {
                     neighborURLs: store.neighborURLs,
                     background: canvasBackground,
                     openZoomMode: openZoomMode,
+                    transition: imageTransition,
                     zoomRequest: store.zoomRequest,
                     rotationCount: store.rotationCount,
                     stepDirection: store.lastStepDirection,

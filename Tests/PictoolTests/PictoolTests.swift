@@ -825,6 +825,26 @@ final class PrintFitTests: XCTestCase {
         )
         XCTAssertEqual(scale, 4.0, accuracy: 0.0001)
     }
+
+    func testPrintMaxPixelUsesPaperLongEdgeAt300dpi() {
+        // 842pt 长边约等于 A4 横向。842 / 72 × 300。
+        let px = PrintPageView.printMaxPixel(paperSize: CGSize(width: 595, height: 842))
+        XCTAssertEqual(px, 842.0 / 72.0 * 300.0, accuracy: 0.001)
+    }
+
+    func testDecodeMaxPixelGrowsWhenTheCropIsSmaller() {
+        let paper = CGSize(width: 595, height: 842)
+        let full = PrintPageView.decodeMaxPixel(
+            paperSize: paper,
+            normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1)
+        )
+        let half = PrintPageView.decodeMaxPixel(
+            paperSize: paper,
+            normalizedRect: CGRect(x: 0, y: 0, width: 0.5, height: 0.4)
+        )
+        XCTAssertEqual(full, PrintPageView.printMaxPixel(paperSize: paper), accuracy: 0.001)
+        XCTAssertEqual(half, full / 0.5, accuracy: 0.001)
+    }
 }
 
 final class DisplayCachePolicyTests: XCTestCase {
@@ -1978,6 +1998,34 @@ final class AnnotationStoreTests: XCTestCase {
                                            sizeFraction: 0.04, color: .palette(0)))
         store.copyToClipboard(other)
         XCTAssertEqual(store.clipboard, other)
+    }
+}
+
+final class ImageHandoffTests: XCTestCase {
+
+    func testParkedFrameKeepsTheOldImageWhereItWas() {
+        let oldFrame = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let oldOrigin = CGPoint(x: -200, y: -150)
+        let newOrigin = CGPoint(x: -100, y: -100)
+        let parked = ImageHandoff.parkedFrame(
+            oldImageFrame: oldFrame,
+            oldBoundsOrigin: oldOrigin,
+            newBoundsOrigin: newOrigin
+        )
+        XCTAssertEqual(parked, CGRect(x: 100, y: 50, width: 400, height: 300))
+        XCTAssertEqual(parked.origin.x - newOrigin.x, oldFrame.origin.x - oldOrigin.x, accuracy: 0.001)
+        XCTAssertEqual(parked.origin.y - newOrigin.y, oldFrame.origin.y - oldOrigin.y, accuracy: 0.001)
+    }
+
+    func testSlideTimingFollowsDirectionAndRapidRepeat() {
+        XCTAssertEqual(ImageHandoff.duration(direction: 1, rapid: false), 0.16, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.duration(direction: 0, rapid: false), 0.14, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.duration(direction: -1, rapid: true), 0.08, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.travel(direction: 1, viewportWidth: 1000), 80, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.travel(direction: 0, viewportWidth: 1000), 0, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.travel(direction: 1, viewportWidth: 0), 0, accuracy: 0.001)
+        // 960 × 0.08 = 76.8,按 2x 对齐到 77,避免半像素边缘。
+        XCTAssertEqual(ImageHandoff.travel(direction: 1, viewportWidth: 960, backing: 2), 77, accuracy: 0.001)
     }
 }
 

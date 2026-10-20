@@ -409,6 +409,7 @@ enum CropService {
     /// 产出最终位图,**编码导出与"打印当前编辑结果"共用这一条**,保证两者像素一致。
     /// `includeGPS` 只决定写出的元数据,与像素无关,所以不在这里。
     /// 标记坐标是变换后整图的归一化 0...1;裁掉的部分连同框外笔迹一起丢掉。
+    /// `maxDecodePixel` 只给打印用:按纸张和裁切比例少解一点。导出保持 nil,仍是全尺寸。
     static func render(sourceURL: URL,
                        normalizedRect: CGRect,
                        quarterTurns: Int = 0,
@@ -416,9 +417,19 @@ enum CropService {
                        flipV: Bool = false,
                        straightenDegrees: Double = 0,
                        maxLongestSide: Int? = nil,
+                       maxDecodePixel: CGFloat? = nil,
                        annotations: [Annotation] = [],
                        watermark: WatermarkSettings? = nil) throws -> CGImage {
-        let full = try ImageLoader.decodeFullCGImage(url: sourceURL)
+        let full: CGImage
+        if let maxDecodePixel, maxDecodePixel > 0 {
+            guard let source = ImageLoader.makeSource(sourceURL),
+                  let cg = ImageLoader.makeCGImage(source: source, maxPixelSize: maxDecodePixel) else {
+                throw CropError.decodeFailed
+            }
+            full = cg
+        } else {
+            full = try ImageLoader.decodeFullCGImage(url: sourceURL)
+        }
         var canvas = CropTransform.apply(
             to: full, quarterTurns: quarterTurns, flipH: flipH, flipV: flipV,
             straightenDegrees: straightenDegrees

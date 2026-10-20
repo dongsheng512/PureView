@@ -13,11 +13,13 @@ struct ImageViewCanvas: NSViewRepresentable {
     let background: CanvasBackground
     /// 打开新图时的默认缩放
     let openZoomMode: OpenZoomMode
+    /// 切图过渡。设置里改完,下一次切图生效。
+    let transition: ImageTransitionStyle
     let zoomRequest: (action: ZoomAction, token: Int)?
     /// 当前图累计旋转次数(每格 90°)。画布按「次数 - 已应用」补差值,
     /// 新建的画布实例(纯净模式切换)能重放完整角度。
     let rotationCount: Int
-    /// 切图方向信号:+1 向后翻(新图从右滑入),-1 向前,0 无方向(淡入)
+    /// 切图方向信号:+1 下一张(新图从左滑入),-1 上一张(从右滑入),0 无方向(淡入)
     let stepDirection: Int
     var onLoadingChange: (Bool) -> Void
     var onScaleChange: (CGFloat) -> Void
@@ -119,6 +121,12 @@ struct ImageViewCanvas: NSViewRepresentable {
         private var isRotatedBitmap = false
         private var mutatingCanvas = false
         private var lastNotifiedPercent = Int.min
+        /// 交叠滑移的覆盖层。真正的图片视图在这段时间里藏起来,避免和动画图层叠成残影。
+        private var handoffOverlay: NSView?
+        /// 递增使过期的过渡收尾不再摘掉新快照。
+        private var handoffGeneration = 0
+        private var lastHandoffStart = TimeInterval(0)
+        private var lastHandoffDuration = TimeInterval(0)
         /// deinit 是 nonisolated 的,Swift 6 不允许它访问非 Sendable 的实例状态。
         /// `DispatchWorkItem.cancel()` 本身线程安全,这里显式标注豁免即可。
         nonisolated(unsafe) private var escalateWork: DispatchWorkItem?
@@ -331,6 +339,7 @@ struct ImageViewCanvas: NSViewRepresentable {
             scrollView.magnification = 1   // 切换图片时重置手势缩放
 
             guard let url else {
+                beginHandoff(restoreImage: true)
                 imageView.image = nil
                 parent.onLoadingChange(false)
                 parent.onImageInfo(DisplayImageInfo())
@@ -342,8 +351,9 @@ struct ImageViewCanvas: NSViewRepresentable {
             let maxPixel = displayMaxPixel()
             if let cached = ImageLoader.cachedDisplayImage(url: url, maxPixelSize: maxPixel) {
                 parent.onLoadingChange(false)
+                let outgoing = makeOutgoingSnapshot()
                 setDisplayImage(cached.image, facts: cached.facts, url: url)
-                runEntryTransition(direction: parent.stepDirection)
+                runEntryTransition(direction: parent.stepDirection, outgoing: outgoing)
                 prefetchNeighbors(maxPixel: maxPixel)
                 return
             }
@@ -358,9 +368,11 @@ struct ImageViewCanvas: NSViewRepresentable {
                 guard !Task.isCancelled, self.currentURL == url else { return }
                 self.parent.onLoadingChange(false)
                 if let loaded {
+                    let outgoing = self.makeOutgoingSnapshot()
                     self.setDisplayImage(loaded.image, facts: loaded.facts, url: url)
-                    self.runEntryTransition(direction: self.parent.stepDirection)
+                    self.runEntryTransition(direction: self.parent.stepDirection, outgoing: outgoing)
                 } else {
+                    self.beginHandoff(restoreImage: true)
                     self.imageView.image = nil
                     self.parent.onImageInfo(DisplayImageInfo())
                 }
@@ -368,15 +380,26 @@ struct ImageViewCanvas: NSViewRepresentable {
             }
         }
 
-        /// 切图入场过渡:新图沿切换方向轻微滑入并淡入(0.25s ease-out),平缓不抢眼。
-        /// 只动图层几何与透明度,GPU 合成,无额外解码。
-        private func runEntryTransition(direction: Int) {
+        /// 切图过渡。淡入只动新图;交叠滑移先把当前位图留成快照,再让新图滑入。
+        private func runEntryTransition(direction: Int, outgoing: OutgoingSnapshot?) {
+            switch parent.transition {
+            case .fade:
+                beginHandoff(restoreImage: true)
+                runFadeTransition(direction: direction)
+            case .slide:
+                runSlideTransition(direction: direction, outgoing: outgoing)
+            }
+        }
+
+        /// 原先的单层效果:新图从透明淡入,左右切换时再滑 24pt。
+        private func runFadeTransition(direction: Int) {
             guard let layer = imageView.layer, imageView.image != nil else { return }
+            layer.removeAnimation(forKey: "entrySlide")
+            layer.removeAnimation(forKey: "entryFade")
+            layer.opacity = 1
             CATransaction.begin()
             CATransaction.setDisableActions(false)
-            layer.removeAnimation(forKey: "entrySlide")
             if direction != 0 {
-                // 从切换方向滑入 24pt + 淡入
                 let slide = CABasicAnimation(keyPath: "position.x")
                 slide.fromValue = layer.position.x - CGFloat(direction) * 24
                 slide.toValue = layer.position.x
@@ -398,6 +421,185 @@ struct ImageViewCanvas: NSViewRepresentable {
                 fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 layer.add(fade, forKey: "entryFade")
             }
+            CATransaction.commit()
+        }
+
+        /// 交叠滑移。有方向:新图不透明,从一侧滑入视口宽度的 8%;旧图停在原位只淡出。
+        /// 旧图再往反方向挪,会在图片另一侧露出一条,看起来像残影。
+        /// 无方向(点缩略图、打开文件夹):只交叉淡化。连按快过上一段时缩到 80ms。
+        /// 动画放在覆盖层自己的子图层上。图片视图的根图层一旦被平移,不透明画布
+        /// 中间几帧不会补画,滑动过程就会拖出残影。
+        private func runSlideTransition(direction: Int, outgoing: OutgoingSnapshot?) {
+            guard let contents = imageView.layer?.contents, imageView.image != nil else {
+                beginHandoff(restoreImage: true)
+                return
+            }
+            let generation = beginHandoff(restoreImage: false)
+            let duration = nextHandoffDuration(direction: direction)
+            let backing = scrollView.window?.backingScaleFactor ?? 2
+            let travel = ImageHandoff.travel(
+                direction: direction,
+                viewportWidth: clipView.bounds.width,
+                backing: backing
+            )
+            guard let overlay = makeHandoffOverlay() else {
+                restoreImageViewPresentation()
+                return
+            }
+            let scale = imageView.layer?.contentsScale ?? (scrollView.window?.backingScaleFactor ?? 2)
+            let newRect = viewportRect(forImageFrame: imageView.frame, boundsOrigin: clipView.bounds.origin)
+            let newLayer = pictureLayer(contents: contents, scale: scale, rect: newRect)
+
+            var oldLayer: CALayer?
+            if let outgoing {
+                let oldRect = viewportRect(forImageFrame: outgoing.frame, boundsOrigin: outgoing.boundsOrigin)
+                oldLayer = pictureLayer(contents: outgoing.contents, scale: outgoing.contentsScale, rect: oldRect)
+            }
+
+            CATransaction.begin()
+            CATransaction.setCompletionBlock { [weak self] in
+                Task { @MainActor in
+                    self?.finishHandoff(generation)
+                }
+            }
+            CATransaction.setDisableActions(true)
+            imageView.alphaValue = 0
+            imageView.layer?.opacity = 0
+            imageView.layer?.transform = CATransform3DIdentity
+            if let oldLayer {
+                oldLayer.opacity = 0
+                overlay.hostLayer.addSublayer(oldLayer)
+            }
+            overlay.hostLayer.addSublayer(newLayer)
+            CATransaction.setDisableActions(false)
+            if direction != 0, travel > 0 {
+                let slide = CABasicAnimation(keyPath: "position.x")
+                slide.fromValue = newLayer.position.x - CGFloat(direction) * travel
+                slide.toValue = newLayer.position.x
+                slide.duration = duration
+                slide.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                slide.fillMode = .backwards
+                newLayer.add(slide, forKey: "entrySlide")
+            } else {
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = 0.0
+                fade.toValue = 1.0
+                fade.duration = duration
+                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                fade.fillMode = .backwards
+                newLayer.add(fade, forKey: "entryFade")
+            }
+            if let oldLayer {
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = 1.0
+                fade.toValue = 0.0
+                fade.duration = duration
+                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                fade.fillMode = .backwards
+                oldLayer.add(fade, forKey: "entryFade")
+            }
+            CATransaction.commit()
+        }
+
+        /// 换图前抓住当前位图和它所在的文档位置。淡入模式不需要快照。
+        private func makeOutgoingSnapshot() -> OutgoingSnapshot? {
+            guard parent.transition == .slide,
+                  imageView.image != nil,
+                  let contents = imageView.layer?.contents,
+                  imageView.frame.width > 1, imageView.frame.height > 1 else { return nil }
+            let scale = imageView.layer?.contentsScale ?? (scrollView.window?.backingScaleFactor ?? 2)
+            return OutgoingSnapshot(
+                contents: contents,
+                contentsScale: scale,
+                frame: imageView.frame,
+                boundsOrigin: clipView.bounds.origin
+            )
+        }
+
+        /// 盖住当前视口的一层。子图层的移动由这层自己合成,不会写进画布的不透明缓存。
+        private func makeHandoffOverlay() -> HandoffOverlay? {
+            let viewport = clipView.bounds
+            guard viewport.width > 1, viewport.height > 1 else { return nil }
+            let overlay = HandoffOverlay(frame: viewport)
+            let host = overlay.hostLayer
+            host.backgroundColor = parent.background.isTranslucent ? nil : parent.background.color.cgColor
+            // 挂在视口上,而不是滚动画布的图片视图上。frame 用 bounds,刚好盖住可见区域。
+            clipView.addSubview(overlay, positioned: .above, relativeTo: imageView)
+            overlay.frame = viewport
+            host.frame = overlay.bounds
+            handoffOverlay = overlay
+            return overlay
+        }
+
+        private func pictureLayer(contents: Any, scale: CGFloat, rect: CGRect) -> CALayer {
+            let layer = CALayer()
+            layer.contents = contents
+            layer.contentsGravity = .resize
+            layer.contentsScale = scale
+            layer.minificationFilter = .trilinear
+            layer.magnificationFilter = .trilinear
+            layer.isOpaque = false
+            layer.backgroundColor = nil
+            layer.shadowOpacity = 0
+            // 边缘抗锯齿会拿透明去混,滑开的一侧留下一条深色残边。
+            layer.allowsEdgeAntialiasing = false
+            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            layer.bounds = CGRect(origin: .zero, size: rect.size)
+            layer.position = CGPoint(x: rect.midX, y: rect.midY)
+            layer.actions = [
+                "bounds": NSNull(),
+                "position": NSNull(),
+                "opacity": NSNull(),
+                "contents": NSNull(),
+                "transform": NSNull(),
+            ]
+            return layer
+        }
+
+        /// 文档坐标换成视口坐标(覆盖层的本地坐标)。
+        private func viewportRect(forImageFrame frame: CGRect, boundsOrigin: CGPoint) -> CGRect {
+            ImageHandoff.parkedFrame(
+                oldImageFrame: frame,
+                oldBoundsOrigin: boundsOrigin,
+                newBoundsOrigin: .zero
+            )
+        }
+
+        private func nextHandoffDuration(direction: Int) -> TimeInterval {
+            let now = CACurrentMediaTime()
+            let rapid = lastHandoffDuration > 0 && now - lastHandoffStart < lastHandoffDuration
+            let duration = ImageHandoff.duration(direction: direction, rapid: rapid)
+            lastHandoffStart = now
+            lastHandoffDuration = duration
+            return duration
+        }
+
+        /// 摘掉正在播的覆盖层,并使它的收尾回调失效。
+        @discardableResult
+        private func beginHandoff(restoreImage: Bool) -> Int {
+            handoffGeneration += 1
+            handoffOverlay?.removeFromSuperview()
+            handoffOverlay = nil
+            if restoreImage { restoreImageViewPresentation() }
+            return handoffGeneration
+        }
+
+        private func finishHandoff(_ generation: Int) {
+            guard handoffGeneration == generation else { return }
+            handoffOverlay?.removeFromSuperview()
+            handoffOverlay = nil
+            restoreImageViewPresentation()
+            clipView.needsDisplay = true
+        }
+
+        private func restoreImageViewPresentation() {
+            imageView.layer?.removeAnimation(forKey: "entrySlide")
+            imageView.layer?.removeAnimation(forKey: "entryFade")
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            imageView.alphaValue = 1
+            imageView.layer?.opacity = 1
+            imageView.layer?.transform = CATransform3DIdentity
             CATransaction.commit()
         }
 
@@ -1008,6 +1210,41 @@ struct ImageViewCanvas: NSViewRepresentable {
     }
 }
 
+/// 切图前的旧图:位图、缩放,以及当时的文档 frame 和 clip bounds.origin。
+private struct OutgoingSnapshot {
+    var contents: Any
+    var contentsScale: CGFloat
+    var frame: CGRect
+    var boundsOrigin: CGPoint
+}
+
+/// 盖在视口上的过渡层。根图层归自己管,子图层滑动不会被 AppKit 再画一份。
+private final class HandoffOverlay: NSView {
+    let hostLayer = CALayer()
+
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        hostLayer.masksToBounds = true
+        hostLayer.isOpaque = false
+        hostLayer.backgroundColor = nil
+        layer = hostLayer
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        hostLayer.frame = bounds
+    }
+}
+
 // MARK: - AppKit 子类
 
 /// 0 宽且不绘制,让 NSScrollView 仍处理滚轮平移,画面上不出条子。
@@ -1110,14 +1347,15 @@ final class CanvasClipView: NSClipView {
            !isDocumentHorizontallyScrollable,
            event.phase != .ended, event.momentumPhase == [] {
             swipeGestureActive = true
-            swipeAccumulatedDX += dx   // 自然滚动:内容左移(dx>0)= 看下一张
+            swipeAccumulatedDX += dx
             // 一个手势只提交一张 + 两次提交至少隔 0.3s,双保险防长滑连切。
-            // 方向换算收口在事件源:自然滚动 dx>0(内容左移)= 看下一张
+            // 从左往右滑 = 下一张,从右往左滑 = 上一张。
+            // 自然滚动下 dx>0 是内容左移(手指向左),所以取上一张。
             let now = CACurrentMediaTime()
             if !swipeCommittedThisGesture,
                now - lastSwipeCommitTime >= Self.swipeCommitMinInterval,
                abs(swipeAccumulatedDX) >= Self.horizontalSwipeThreshold {
-                onHorizontalSwipe?(swipeAccumulatedDX > 0 ? 1 : -1)
+                onHorizontalSwipe?(swipeAccumulatedDX > 0 ? -1 : 1)
                 swipeCommittedThisGesture = true
                 lastSwipeCommitTime = now
                 swipeAccumulatedDX = 0
@@ -1352,8 +1590,8 @@ final class CanvasImageView: NSImageView {
     override func mouseUp(with event: NSEvent) {
         defer { resetDragState() }
         guard dragMode == .swipe, abs(swipeTotalDX) >= Self.swipeCommitThreshold else { return }
-        // 方向换算收口在事件源:向右拖(dx>0)= 上一张,向左拖 = 下一张
-        onSwipe?(swipeTotalDX > 0 ? -1 : 1)
+        // 从左往右拖(dx>0)= 下一张,向左拖 = 上一张。与触控板横滑同一方向。
+        onSwipe?(swipeTotalDX > 0 ? 1 : -1)
     }
 
     private func resetDragState() {

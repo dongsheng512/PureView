@@ -119,6 +119,9 @@ struct EditView: View {
     /// 打印前要把编辑结果渲染成位图,和导出一样是重活。此标志用于在渲染期间禁用按钮,
     /// 防止连点弹出两个打印面板。
     @State private var printPreparing = false
+    /// 取消准备时递增,进行中的渲染结果直接丢掉。
+    @State private var printGeneration = 0
+    @State private var printError: String?
     @State private var errorMessage: String?
     /// 「存储为」成功后的短提示。覆盖原图仍直接退出,不走这条。
     @State private var exportNotice: String?
@@ -227,6 +230,34 @@ struct EditView: View {
                   old != effect else { return }
             pushUndo()
             annotations[index].kind = .mosaic(points: points, widthLevel: widthLevel, effect: effect)
+        }
+        .overlay {
+            if printPreparing {
+                VStack(spacing: 8) {
+                    ProgressView("正在准备打印…")
+                    Button("取消") {
+                        printGeneration += 1
+                        printPreparing = false
+                    }
+                    .controlSize(.small)
+                }
+                .padding(14)
+                .background {
+                    AdaptiveGlassSurface(
+                        shape: RoundedRectangle(cornerRadius: 10),
+                        legacyStroke: nil,
+                        shadowOpacity: 0
+                    )
+                }
+            }
+        }
+        .alert("无法打印", isPresented: Binding(
+            get: { printError != nil },
+            set: { if !$0 { printError = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(printError ?? "")
         }
         .alert("导出失败", isPresented: .init(
             get: { errorMessage != nil },
@@ -2186,26 +2217,33 @@ struct EditView: View {
         if draftAnchor != nil { commitDraft() }
 
         printPreparing = true
+        printGeneration += 1
+        let generation = printGeneration
         let url = file.url
         let anns = annotations
         let turns = quarterTurns, fh = flipH, fv = flipV, deg = straighten
         let rect = selection
         let mark = watermarkDraft
+        let paper = NSPrintInfo.shared.paperSize
+        let decodeCap = PrintPageView.decodeMaxPixel(paperSize: paper, normalizedRect: rect)
+        let outputCap = Int(PrintPageView.printMaxPixel(paperSize: paper).rounded())
         Task {
             let result = await Task.detached(priority: .userInitiated) { () -> Result<CGImage, Error> in
                 Result {
                     try CropService.render(
                         sourceURL: url, normalizedRect: rect,
                         quarterTurns: turns, flipH: fh, flipV: fv, straightenDegrees: deg,
-                        maxLongestSide: nil,
+                        maxLongestSide: outputCap,
+                        maxDecodePixel: decodeCap,
                         annotations: anns, watermark: mark
                     )
                 }
             }.value
+            guard generation == printGeneration else { return }
             printPreparing = false
             switch result {
             case .failure(let error):
-                errorMessage = error.localizedDescription
+                printError = error.localizedDescription
             case .success(let cg):
                 PrintService.print(image: NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)))
             }

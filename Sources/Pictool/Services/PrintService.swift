@@ -28,10 +28,15 @@ enum PrintService {
         let view = PrintPageView(image: image)
         let operation = NSPrintOperation(view: view, printInfo: info)
         operation.canSpawnSeparateThread = false
-        operation.printPanel.options.insert([.showsOrientation, .showsScaling])
+        // 纸张和方向都露出来。改其中任意一个时,下面的 follower 会把百分比重算成新的铺满值。
+        operation.printPanel.options = [
+            .showsCopies, .showsPaperSize, .showsOrientation, .showsScaling, .showsPreview,
+        ]
+        let follower = PrintScaleFollower(info: info, imageSize: imgSize)
         if let window = NSApp.keyWindow ?? NSApp.mainWindow {
             operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
         }
+        follower.invalidate()
     }
 
     // MARK: - 拼版(联系表)
@@ -52,9 +57,9 @@ enum PrintService {
     ///
     /// 版式(几列几行、每格多少点、预留文件名条)全部在页内算好,所以:
     /// - 用**显式分页**(`knowsPageRange` / `rectForPage`),而不是单张路径的 `clip`;
-    /// - `scalingFactor = 1`,否则面板的百分比会把整个格网二次缩到纸心;
-    /// - 面板里**不给**换纸/换方向——版式在打开面板前就按当时的纸张定死了,
-    ///   事后换纸会让版式与纸张对不上。改纸请先取消、在系统里换默认纸再重开。
+    /// - `scalingFactor = 1`,面板里也不提供缩放,否则百分比会把整个格网再缩一次;
+    /// - 面板里不提供换纸/换方向——版式在打开面板前就按当时的纸张定死了。
+    ///   改纸请先取消,在系统里换默认纸再重开。
     static func print(contactSheet items: [ContactSheetItem], options: ContactSheetOptions) {
         guard !items.isEmpty else { return }
 
@@ -78,7 +83,7 @@ enum PrintService {
         let view = ContactSheetView(metrics: metrics, items: items)
         let operation = NSPrintOperation(view: view, printInfo: info)
         operation.canSpawnSeparateThread = false
-        operation.printPanel.options.insert([.showsCopies, .showsScaling, .showsPageRange])
+        operation.printPanel.options = [.showsCopies, .showsPageRange, .showsPreview]
         if let window = NSApp.keyWindow ?? NSApp.mainWindow {
             operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
         }
@@ -124,5 +129,54 @@ final class PrintPageView: NSView {
             return 1
         }
         return min(paperSize.width / imageSize.width, paperSize.height / imageSize.height)
+    }
+
+    /// 当前纸张长边在 300dpi 下的像素。纸张尺寸是点(1/72 英寸)。
+    /// 小相纸少解一点,A3 比固定的 3600 更够用。
+    nonisolated static func printMaxPixel(paperSize: NSSize) -> CGFloat {
+        let longest = max(paperSize.width, paperSize.height)
+        guard longest > 0 else { return 3600 }
+        return longest / 72 * ContactSheetLayout.printTargetDPI
+    }
+
+    /// 裁切只占整图的一部分时,解码要放大到让裁出来的那块仍够铺满纸。
+    /// 整图(边长为 1)时与 `printMaxPixel` 相同。
+    nonisolated static func decodeMaxPixel(paperSize: NSSize, normalizedRect: CGRect) -> CGFloat {
+        let paper = printMaxPixel(paperSize: paperSize)
+        let span = max(normalizedRect.width, normalizedRect.height)
+        guard span > 0.001 else { return paper }
+        return paper / min(span, 1)
+    }
+}
+
+/// 打印面板里改纸张或方向后,把缩放百分比重新设成「刚好铺满」。
+/// 用户拖过的百分比只在纸张没变时保留;纸一变,旧百分比会裁切或留出大块空白。
+private final class PrintScaleFollower: NSObject, @unchecked Sendable {
+    private let imageSize: NSSize
+    private var observations: [NSKeyValueObservation] = []
+
+    init(info: NSPrintInfo, imageSize: NSSize) {
+        self.imageSize = imageSize
+        super.init()
+        observations = [
+            info.observe(\.paperSize, options: [.new]) { [weak self] info, _ in
+                self?.refit(info)
+            },
+            info.observe(\.orientation, options: [.new]) { [weak self] info, _ in
+                self?.refit(info)
+            },
+        ]
+    }
+
+    func invalidate() {
+        observations.removeAll()
+    }
+
+    /// 方向和纸张会先后通知。后一次读到的 paperSize 已经是新纸,百分比跟着铺满。
+    private func refit(_ info: NSPrintInfo) {
+        let scale = PrintPageView.fitScale(imageSize: imageSize, paperSize: info.paperSize)
+        if abs(info.scalingFactor - scale) > 0.0001 {
+            info.scalingFactor = scale
+        }
     }
 }

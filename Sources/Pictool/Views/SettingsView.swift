@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage(ImageSortKey.storageKey) private var sortKey = ImageSortKey.defaultValue
     @AppStorage(ImageSortDirection.storageKey) private var sortDirection = ImageSortDirection.defaultValue
     @AppStorage(SlideShowInterval.storageKey) private var slideshowInterval = SlideShowInterval.defaultValue
+    @AppStorage(ImageTransitionStyle.storageKey) private var imageTransition = ImageTransitionStyle.defaultValue
     @State private var watermark = WatermarkSettings.load()
 
     var body: some View {
@@ -38,6 +39,12 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 Toggle("到首尾后循环", isOn: $wrapNavigation)
+                Picker("切换效果", selection: $imageTransition) {
+                    ForEach(ImageTransitionStyle.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.radioGroup)
                 Picker("排序", selection: $sortKey) {
                     ForEach(ImageSortKey.allCases) { option in
                         Text(option.label).tag(option)
