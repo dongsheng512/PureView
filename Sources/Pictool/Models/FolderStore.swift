@@ -298,17 +298,20 @@ final class FolderStore {
         return images.first { $0.id == id }
     }
 
-    /// 当前图前后各 1 张,供主视图预解码。
-    /// 跟着**过滤后的**序列走:过滤生效时预解码不该去读被筛掉的图。
-    var neighborURLs: [URL] {
+    /// 当前图前后各 1 张,供主视图预解码和跟手翻页。
+    /// 跟着**过滤后的**序列走:过滤生效时不该去读被筛掉的图。
+    /// 开了循环时,首尾会绕到另一端;只有一张时两侧都空。
+    var neighbors: ImageNeighbors {
         let list = visibleImages
         let idx = visibleIndex
-        guard selectedImageID != nil, !list.isEmpty, idx >= 0 else { return [] }
-        return [-1, 1].compactMap { offset in
-            let target = idx + offset
-            guard list.indices.contains(target) else { return nil }
+        guard selectedImageID != nil, list.count > 1, idx >= 0 else { return ImageNeighbors() }
+        func url(delta: Int) -> URL? {
+            guard let target = ImageNavigation.nextIndex(
+                current: idx, count: list.count, delta: delta, wrap: wrapNavigation
+            ), target != idx else { return nil }
             return list[target].url
         }
+        return ImageNeighbors(previous: url(delta: -1), next: url(delta: 1))
     }
 
     var currentIndex: Int {

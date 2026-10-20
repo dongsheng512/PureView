@@ -1,9 +1,10 @@
 import CoreGraphics
 import Foundation
 
-/// 左右切图、点缩略图时的过渡。默认交叠滑移;淡入是原先的单层效果。
+/// 左右切图、点缩略图时的过渡。默认跟手翻页;淡入是原先的单层效果。
 enum ImageTransitionStyle: String, CaseIterable, Identifiable {
-    /// 新图不透明短滑入,旧图停在原位淡出。无方向时只交叉淡化。
+    /// 拖拽或触控板时图片跟着手指走。往左滑出下一张(从右边进来),往右滑回上一张。
+    /// 松手未过线则弹回。方向键和按钮也是同一套整页滑移。无方向(点缩略图)只交叉淡化。
     case slide
     /// 新图从透明淡入,并沿方向滑 24pt。
     case fade
@@ -15,18 +16,68 @@ enum ImageTransitionStyle: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .slide: "交叠滑移"
+        case .slide: "跟手翻页"
         case .fade: "淡入"
         }
     }
 }
 
+/// 当前图的前一张和后一张。只有一张、或那一侧到头且不循环时为 nil。
+struct ImageNeighbors: Equatable, Sendable {
+    var previous: URL?
+    var next: URL?
+
+    var urls: [URL] {
+        [previous, next].compactMap { $0 }
+    }
+
+    func url(direction: Int) -> URL? {
+        if direction > 0 { return next }
+        if direction < 0 { return previous }
+        return nil
+    }
+}
+
 /// 交叠滑移的时长与位移。纯函数,方便单测。
 enum ImageHandoff {
-    /// 有方向 160ms,无方向交叉淡化 140ms。上一段还没放完时缩短到 80ms。
+    /// 有方向的整页滑移 380ms,连按还没放完时 220ms。无方向交叉淡化 160ms / 100ms。
     static func duration(direction: Int, rapid: Bool) -> TimeInterval {
-        if rapid { return 0.08 }
-        return direction == 0 ? 0.14 : 0.16
+        if direction == 0 { return rapid ? 0.10 : 0.16 }
+        return rapid ? 0.22 : 0.38
+    }
+
+    /// 松手后的弹簧。`distance` 是还要走的位移(落点减现在),`velocity` 是手指速度,点/秒。
+    /// `initialVelocity` 朝向落点为正,1 表示按这个速度一秒能走完剩下的路。
+    struct PagingRelease: Equatable {
+        var perceptualDuration: TimeInterval
+        var bounce: CGFloat
+        var initialVelocity: CGFloat
+    }
+
+    static func pagingRelease(distance: CGFloat, velocity: CGFloat) -> PagingRelease {
+        let remaining = abs(distance)
+        let speed = abs(velocity)
+        let perceptualDuration: TimeInterval
+        if speed > 900, remaining > 1 {
+            // 快甩时顺着当前速度把剩下的路走完,不要先停一下再起步。
+            perceptualDuration = min(0.46, max(0.26, TimeInterval(remaining / speed) * 1.35))
+        } else if remaining < 48 {
+            perceptualDuration = 0.28
+        } else {
+            perceptualDuration = 0.40
+        }
+        var initialVelocity: CGFloat = 0
+        if remaining > 1 {
+            initialVelocity = velocity / distance
+        }
+        if !initialVelocity.isFinite { initialVelocity = 0 }
+        initialVelocity = min(6, max(-6, initialVelocity))
+        // 略过阻尼,停在落点上,不冲进再下一张。
+        return PagingRelease(
+            perceptualDuration: perceptualDuration,
+            bounce: -0.18,
+            initialVelocity: initialVelocity
+        )
     }
 
     /// 视口宽度的 8%,对齐到物理像素。半像素位移会在滑开的那一侧留一条深边。无方向不滑。
@@ -43,6 +94,127 @@ enum ImageHandoff {
             y: oldImageFrame.origin.y - oldBoundsOrigin.y + newBoundsOrigin.y,
             width: oldImageFrame.width,
             height: oldImageFrame.height
+        )
+    }
+
+    /// 两页之间的缝。相册翻页不是贴在一起滑的。
+    static let pageGap: CGFloat = 20
+    /// 慢拖要过视口的这个比例才翻页,避免轻碰一下图就自己跑走。
+    static let commitFraction: CGFloat = 0.34
+    /// 超过这个速度(点/秒),并且已经顺手挪开一点,算甩动,不用拖过比例线。
+    static let flickSpeed: CGFloat = 680
+    static let flickMinimumTravel: CGFloat = 20
+    /// 用速度外推这么久,估松手后会落在哪。
+    static let projectionTime: CGFloat = 0.22
+    /// 把触控板 `scrollingDeltaX` 换成手指方向。返回值 > 0 表示手指向右。
+    /// 自然滚动打开时,系统已经把 delta 倒成「内容跟手」;关掉时仍是设备原值(手指向左为正),这里再倒回来。
+    /// 翻页要跟手指,不跟滚动条偏好。鼠标拖拽不走这里。
+    static func trackpadFingerDelta(_ scrollingDelta: CGFloat, naturalScrolling: Bool) -> CGFloat {
+        naturalScrolling ? scrollingDelta : -scrollingDelta
+    }
+
+    /// 松手后的纯惯性。手指已经按上时不能吞,否则连着滑时新手势还带着上一段的惯性标记,画面会空转一阵。
+    static func shouldSwallowPagingMomentum(fingerDown: Bool, momentum: Bool, armed: Bool) -> Bool {
+        armed && momentum && !fingerDown
+    }
+
+    /// 这次滚轮要不要交给跟手翻页。鼠标滚轮没有手指相位,不走这里。
+    /// 文档本身能横向滚动时仍是平移。纯惯性不跟手。
+    static func shouldTrackPagingScroll(
+        fingerDown: Bool,
+        momentum: Bool,
+        horizontal: Bool,
+        gestureActive: Bool,
+        documentScrollsHorizontally: Bool
+    ) -> Bool {
+        if documentScrollsHorizontally { return false }
+        if !fingerDown && !gestureActive { return false }
+        if momentum && !fingerDown { return false }
+        return gestureActive || horizontal
+    }
+
+    /// 邻图相对当前图的水平偏移。相册方向:下一张在右边,上一张在左边。
+    /// 内容跟着手指走,往左拖才把右边的下一张拉进来。
+    static func pageOffset(direction: Int, viewportWidth: CGFloat, gap: CGFloat = pageGap) -> CGFloat {
+        guard direction != 0, viewportWidth > 0 else { return 0 }
+        return CGFloat(direction) * (viewportWidth + gap)
+    }
+
+    /// 松手后内容要落到的位移。与 `pageOffset` 相反,才能把那一侧的图拉到视口中央。
+    static func commitTranslation(direction: Int, viewportWidth: CGFloat, gap: CGFloat = pageGap) -> CGFloat {
+        guard direction != 0, viewportWidth > 0 else { return 0 }
+        return -CGFloat(direction) * (viewportWidth + gap)
+    }
+
+    /// 跟手位移。手指往哪,图往哪,有邻图时 1:1,最多拉过一整页。
+    /// 往左(负)是下一张,往右(正)是上一张。到头则走系统滚动那条橡皮筋。
+    static func presentedTranslation(
+        raw: CGFloat,
+        viewportWidth: CGFloat,
+        hasNext: Bool,
+        hasPrevious: Bool
+    ) -> CGFloat {
+        guard viewportWidth > 0, raw != 0 else { return 0 }
+        let travel = viewportWidth + pageGap
+        if raw < 0 {
+            return hasNext ? max(raw, -travel) : rubberBand(raw, dimension: viewportWidth)
+        }
+        return hasPrevious ? min(raw, travel) : rubberBand(raw, dimension: viewportWidth)
+    }
+
+    /// 系统滚动的橡皮筋。`dimension` 用视口宽度,系数 0.55。越拉越沉,但不会一下子顶死。
+    static func rubberBand(_ translation: CGFloat, dimension: CGFloat, coefficient: CGFloat = 0.55) -> CGFloat {
+        guard dimension > 0, translation != 0 else { return 0 }
+        let sign: CGFloat = translation < 0 ? -1 : 1
+        let x = abs(translation)
+        let resisted = (1 - (1 / (x * coefficient / dimension + 1))) * dimension
+        return sign * resisted
+    }
+
+    /// 松手往哪翻。translation < 0 是内容左移(手指向左),走向下一张。
+    /// 慢拖要过 `commitFraction`;顺手甩动过 `flickSpeed` 则提前翻。否则弹回。
+    static func commitDirection(translation: CGFloat, velocity: CGFloat, viewportWidth: CGFloat) -> Int {
+        guard viewportWidth > 1 else { return 0 }
+        if velocity <= -flickSpeed, translation < -flickMinimumTravel { return 1 }
+        if velocity >= flickSpeed, translation > flickMinimumTravel { return -1 }
+        let projected = translation + velocity * projectionTime
+        let threshold = viewportWidth * commitFraction
+        if projected <= -threshold { return 1 }
+        if projected >= threshold { return -1 }
+        return 0
+    }
+
+    /// 松手已经决定翻页、弹簧还没停又按住。
+    /// `shift` 是旧画布的位移,`commitTranslation` 是这次要落到的位移。
+    /// 返回值把刚翻到的那张当成 0,接住的那一帧画面不跳。
+    static func translationAfterCommittedInterrupt(shift: CGFloat, commitTranslation: CGFloat) -> CGFloat {
+        shift - commitTranslation
+    }
+
+    /// 接住已提交的翻页之后,松手判定用相对接住点的位移。
+    /// 没走完的弹簧不能算成手指又往回翻了一页。
+    static func pagingDecisionTranslation(
+        presented: CGFloat,
+        grabbedFromCommit: Bool,
+        grabTranslation: CGFloat
+    ) -> CGFloat {
+        grabbedFromCommit ? presented - grabTranslation : presented
+    }
+
+    /// 邻图在视口里的适配矩形,原点在视口中心对齐后的左下角。边缘对齐到物理像素。
+    static func fittedRect(imageSize: CGSize, viewport: CGSize, backing: CGFloat = 1) -> CGRect {
+        guard imageSize.width > 1, imageSize.height > 1, viewport.width > 1, viewport.height > 1 else {
+            return .zero
+        }
+        let scale = backing > 0 ? backing : 1
+        func snap(_ value: CGFloat) -> CGFloat { (value * scale).rounded() / scale }
+        let fit = min(viewport.width / imageSize.width, viewport.height / imageSize.height)
+        let size = CGSize(width: snap(imageSize.width * fit), height: snap(imageSize.height * fit))
+        return CGRect(
+            x: snap((viewport.width - size.width) / 2),
+            y: snap((viewport.height - size.height) / 2),
+            width: size.width,
+            height: size.height
         )
     }
 }

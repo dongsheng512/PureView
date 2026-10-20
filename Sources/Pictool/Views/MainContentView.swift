@@ -209,7 +209,7 @@ struct MainContentView: View {
         ZStack {
             ImageViewCanvas(
                 file: store.currentImage,
-                neighborURLs: store.neighborURLs,
+                neighbors: store.neighbors,
                 background: canvasBackground,
                 openZoomMode: openZoomMode,
                 transition: imageTransition,
@@ -220,7 +220,10 @@ struct MainContentView: View {
                 onScaleChange: { store.displayScale = $0 },
                 onImageInfo: { store.displayInfo = $0 },
                 onRotationChange: { store.isDisplayRotated = $0 },
-                onStep: { store.step($0) }
+                onStep: { delta in
+                    store.step(delta)
+                    return store.neighbors
+                }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -609,7 +612,7 @@ struct MainContentView: View {
                 } else {
                 ImageViewCanvas(
                     file: store.currentImage,
-                    neighborURLs: store.neighborURLs,
+                    neighbors: store.neighbors,
                     background: canvasBackground,
                     openZoomMode: openZoomMode,
                     transition: imageTransition,
@@ -620,7 +623,10 @@ struct MainContentView: View {
                     onScaleChange: { store.displayScale = $0 },
                     onImageInfo: { store.displayInfo = $0 },
                     onRotationChange: { store.isDisplayRotated = $0 },
-                    onStep: { store.step($0) },
+                    onStep: { delta in
+                        store.step(delta)
+                        return store.neighbors
+                    },
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contextMenu {

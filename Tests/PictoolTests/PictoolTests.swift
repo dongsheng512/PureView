@@ -2018,14 +2018,163 @@ final class ImageHandoffTests: XCTestCase {
     }
 
     func testSlideTimingFollowsDirectionAndRapidRepeat() {
-        XCTAssertEqual(ImageHandoff.duration(direction: 1, rapid: false), 0.16, accuracy: 0.001)
-        XCTAssertEqual(ImageHandoff.duration(direction: 0, rapid: false), 0.14, accuracy: 0.001)
-        XCTAssertEqual(ImageHandoff.duration(direction: -1, rapid: true), 0.08, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.duration(direction: 1, rapid: false), 0.38, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.duration(direction: 0, rapid: false), 0.16, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.duration(direction: -1, rapid: true), 0.22, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.duration(direction: 0, rapid: true), 0.10, accuracy: 0.001)
+        // 800pt / 4000pt/s = 0.2,夹到下限 0.22。慢拖用 0.36。
+        let flick = ImageHandoff.pagingRelease(distance: -800, velocity: -4000)
+        XCTAssertEqual(flick.perceptualDuration, 0.27, accuracy: 0.001)
+        XCTAssertEqual(flick.initialVelocity, 5, accuracy: 0.001)
+        XCTAssertEqual(flick.bounce, -0.18, accuracy: 0.001)
+        let slow = ImageHandoff.pagingRelease(distance: -700, velocity: 0)
+        XCTAssertEqual(slow.perceptualDuration, 0.40, accuracy: 0.001)
+        XCTAssertEqual(slow.initialVelocity, 0, accuracy: 0.001)
+        // 还在往左甩,落点却在右边:速度是离开落点的,弹簧要先顺着手指再拉回来。
+        let away = ImageHandoff.pagingRelease(distance: 200, velocity: -500)
+        XCTAssertLessThan(away.initialVelocity, 0)
         XCTAssertEqual(ImageHandoff.travel(direction: 1, viewportWidth: 1000), 80, accuracy: 0.001)
         XCTAssertEqual(ImageHandoff.travel(direction: 0, viewportWidth: 1000), 0, accuracy: 0.001)
         XCTAssertEqual(ImageHandoff.travel(direction: 1, viewportWidth: 0), 0, accuracy: 0.001)
         // 960 × 0.08 = 76.8,按 2x 对齐到 77,避免半像素边缘。
         XCTAssertEqual(ImageHandoff.travel(direction: 1, viewportWidth: 960, backing: 2), 77, accuracy: 0.001)
+    }
+
+    func testTrackpadFingerDeltaIgnoresTheScrollPreference() {
+        // 自然滚动开着:系统 delta 已经是手指向右为正。
+        XCTAssertEqual(ImageHandoff.trackpadFingerDelta(12, naturalScrolling: true), 12)
+        XCTAssertEqual(ImageHandoff.trackpadFingerDelta(-12, naturalScrolling: true), -12)
+        // 关掉之后设备原值是手指向左为正,翻页再倒一次,两种设置下手指向左都是负。
+        XCTAssertEqual(ImageHandoff.trackpadFingerDelta(12, naturalScrolling: false), -12)
+        XCTAssertEqual(ImageHandoff.trackpadFingerDelta(-12, naturalScrolling: false), 12)
+        XCTAssertEqual(ImageHandoff.trackpadFingerDelta(0, naturalScrolling: true), 0)
+
+        // 纯惯性吞掉。手指按上后即使还带着惯性标记,也要跟手,不能空等惯性结束。
+        XCTAssertTrue(ImageHandoff.shouldSwallowPagingMomentum(fingerDown: false, momentum: true, armed: true))
+        XCTAssertFalse(ImageHandoff.shouldSwallowPagingMomentum(fingerDown: true, momentum: true, armed: true))
+        XCTAssertFalse(ImageHandoff.shouldSwallowPagingMomentum(fingerDown: false, momentum: true, armed: false))
+        XCTAssertTrue(ImageHandoff.shouldTrackPagingScroll(
+            fingerDown: true, momentum: true, horizontal: true, gestureActive: false, documentScrollsHorizontally: false
+        ))
+        XCTAssertFalse(ImageHandoff.shouldTrackPagingScroll(
+            fingerDown: false, momentum: true, horizontal: true, gestureActive: false, documentScrollsHorizontally: false
+        ))
+        // 手势已经接住后,后续不那么横的事件也要送进去,包括松手。
+        XCTAssertTrue(ImageHandoff.shouldTrackPagingScroll(
+            fingerDown: true, momentum: false, horizontal: false, gestureActive: true, documentScrollsHorizontally: false
+        ))
+        // 竖滑和鼠标滚轮(没有手指相位)不抢。放大后的横拖仍是平移。
+        XCTAssertFalse(ImageHandoff.shouldTrackPagingScroll(
+            fingerDown: true, momentum: false, horizontal: false, gestureActive: false, documentScrollsHorizontally: false
+        ))
+        XCTAssertFalse(ImageHandoff.shouldTrackPagingScroll(
+            fingerDown: false, momentum: false, horizontal: true, gestureActive: false, documentScrollsHorizontally: false
+        ))
+        XCTAssertFalse(ImageHandoff.shouldTrackPagingScroll(
+            fingerDown: true, momentum: true, horizontal: true, gestureActive: false, documentScrollsHorizontally: true
+        ))
+    }
+
+    func testPagingFollowsTheFingerAndResistsAMissingNeighbor() {
+        // 相册方向:下一张在右边,上一张在左边。往左拖(负)才把下一张拉到中间。
+        XCTAssertEqual(ImageHandoff.pageOffset(direction: 1, viewportWidth: 1000), 1020, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.pageOffset(direction: -1, viewportWidth: 1000), -1020, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.commitTranslation(direction: 1, viewportWidth: 1000), -1020, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.commitTranslation(direction: 0, viewportWidth: 1000), 0, accuracy: 0.001)
+
+        let open = ImageHandoff.presentedTranslation(
+            raw: -400, viewportWidth: 1000, hasNext: true, hasPrevious: true
+        )
+        XCTAssertEqual(open, -400, accuracy: 0.001)
+        let capped = ImageHandoff.presentedTranslation(
+            raw: -5000, viewportWidth: 1000, hasNext: true, hasPrevious: false
+        )
+        XCTAssertEqual(capped, -1020, accuracy: 0.001)
+        let resisted = ImageHandoff.presentedTranslation(
+            raw: 400, viewportWidth: 1000, hasNext: true, hasPrevious: false
+        )
+        XCTAssertGreaterThan(resisted, 0)
+        XCTAssertLessThan(resisted, 250)
+        // 100 × 0.55 的系统橡皮筋:(1 - 1/1.55) × 100。
+        XCTAssertEqual(ImageHandoff.rubberBand(100, dimension: 100), 35.4838709677, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.rubberBand(-100, dimension: 100), -35.4838709677, accuracy: 0.001)
+    }
+
+    func testPagingCommitsPastTheThresholdOrWithAFlick() {
+        // 往左过 34% 是下一张,往右是上一张。
+        XCTAssertEqual(ImageHandoff.commitDirection(translation: -340, velocity: 0, viewportWidth: 1000), 1)
+        XCTAssertEqual(ImageHandoff.commitDirection(translation: 340, velocity: 0, viewportWidth: 1000), -1)
+        XCTAssertEqual(ImageHandoff.commitDirection(translation: -200, velocity: 0, viewportWidth: 1000), 0)
+        // 位移不大,但向左甩过 680pt/s。
+        XCTAssertEqual(ImageHandoff.commitDirection(translation: -30, velocity: -800, viewportWidth: 1000), 1)
+        // 速度向右,几乎没挪开,不算甩。
+        XCTAssertEqual(ImageHandoff.commitDirection(translation: 4, velocity: 800, viewportWidth: 1000), 0)
+        // -200 + -700 × 0.22 = -354,外推越过 340。
+        XCTAssertEqual(ImageHandoff.commitDirection(translation: -200, velocity: -700, viewportWidth: 1000), 1)
+        XCTAssertEqual(ImageHandoff.commitDirection(translation: 0, velocity: 0, viewportWidth: 1000), 0)
+    }
+
+    func testCommittedInterruptRecentersWithoutTurningTheRestIntoAnotherPage() {
+        // 视口 1000、缝 20。翻到下一张的落点是 -1020。弹簧走到一半又按住,新位移以刚翻到的那张为 0。
+        let commit = ImageHandoff.commitTranslation(direction: 1, viewportWidth: 1000)
+        XCTAssertEqual(
+            ImageHandoff.translationAfterCommittedInterrupt(shift: commit, commitTranslation: commit),
+            0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            ImageHandoff.translationAfterCommittedInterrupt(shift: -510, commitTranslation: commit),
+            510,
+            accuracy: 0.001
+        )
+        let grabbed = ImageHandoff.translationAfterCommittedInterrupt(shift: -200, commitTranslation: commit)
+        // 接住之后手指没再动:相对位移是 0。若直接拿 820 去判定,会当成往回翻。
+        XCTAssertEqual(
+            ImageHandoff.pagingDecisionTranslation(presented: grabbed, grabbedFromCommit: true, grabTranslation: grabbed),
+            0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(ImageHandoff.commitDirection(translation: grabbed, velocity: 0, viewportWidth: 1000), -1)
+        XCTAssertEqual(
+            ImageHandoff.commitDirection(
+                translation: ImageHandoff.pagingDecisionTranslation(
+                    presented: grabbed,
+                    grabbedFromCommit: true,
+                    grabTranslation: grabbed
+                ),
+                velocity: 0,
+                viewportWidth: 1000
+            ),
+            0
+        )
+        // 接住后再向左甩,相对接住点的位移过了甩动线,才是再下一张。
+        XCTAssertEqual(
+            ImageHandoff.commitDirection(
+                translation: ImageHandoff.pagingDecisionTranslation(
+                    presented: grabbed - 40,
+                    grabbedFromCommit: true,
+                    grabTranslation: grabbed
+                ),
+                velocity: -2000,
+                viewportWidth: 1000
+            ),
+            1
+        )
+    }
+
+    func testFittedRectCentersAndKeepsAspect() {
+        let rect = ImageHandoff.fittedRect(
+            imageSize: CGSize(width: 200, height: 100),
+            viewport: CGSize(width: 100, height: 100)
+        )
+        XCTAssertEqual(rect.width, 100, accuracy: 0.001)
+        XCTAssertEqual(rect.height, 50, accuracy: 0.001)
+        XCTAssertEqual(rect.minX, 0, accuracy: 0.001)
+        XCTAssertEqual(rect.midY, 50, accuracy: 0.001)
+        XCTAssertEqual(
+            ImageHandoff.fittedRect(imageSize: .zero, viewport: CGSize(width: 10, height: 10)),
+            .zero
+        )
     }
 }
 

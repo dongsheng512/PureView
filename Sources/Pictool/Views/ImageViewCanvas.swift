@@ -8,7 +8,8 @@ import ImageIO
 struct ImageViewCanvas: NSViewRepresentable {
 
     let file: ImageFile?
-    let neighborURLs: [URL]
+    /// 跟手翻页会在 SwiftUI 刷新前先写回刚翻到的邻图,避免下一滑还用旧的左右邻居。
+    var neighbors: ImageNeighbors
     /// 画布背景(来自偏好设置),切图与切换偏好时实时生效
     let background: CanvasBackground
     /// 打开新图时的默认缩放
@@ -19,14 +20,14 @@ struct ImageViewCanvas: NSViewRepresentable {
     /// 当前图累计旋转次数(每格 90°)。画布按「次数 - 已应用」补差值,
     /// 新建的画布实例(纯净模式切换)能重放完整角度。
     let rotationCount: Int
-    /// 切图方向信号:+1 下一张(新图从左滑入),-1 上一张(从右滑入),0 无方向(淡入)
+    /// 切图方向信号:+1 下一张(新图从右滑入),-1 上一张(从左滑入),0 无方向(淡入)
     let stepDirection: Int
     var onLoadingChange: (Bool) -> Void
     var onScaleChange: (CGFloat) -> Void
     var onImageInfo: (DisplayImageInfo) -> Void
     /// 当前显示位图是否已被用户旋转。旋转是纯显示态,切图即丢,需要让界面如实告知。
     var onRotationChange: (Bool) -> Void
-    var onStep: (Int) -> Void
+    var onStep: (Int) -> ImageNeighbors
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -37,6 +38,7 @@ struct ImageViewCanvas: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
+        coordinator.resolvePagingCommit(file?.url)
         coordinator.applyFile(file)
         coordinator.applyBackground(background)
         if let request = zoomRequest, request.token != coordinator.appliedZoomToken {
@@ -123,6 +125,14 @@ struct ImageViewCanvas: NSViewRepresentable {
         private var lastNotifiedPercent = Int.min
         /// 交叠滑移的覆盖层。真正的图片视图在这段时间里藏起来,避免和动画图层叠成残影。
         private var handoffOverlay: NSView?
+        /// 跟手翻页。松手动画期间仍占着这块,避免同一时间再开一段。
+        /// 松手时立刻改选中,弹簧只负责把画面送到位。若等弹簧停了再翻页,
+        /// 下一次滑动还顶在旧图的尽头上,看起来就像卡住,缩略图高亮也会晚一拍。
+        private var paging = Paging()
+        /// 跟手已经把邻图拉到位时,新图落地不再播一次短滑入。
+        private var skipNextEntry = false
+        /// onStep 之后若选中图没变,下一帧把翻页层收掉。
+        private var pagingPendingCommit = false
         /// 递增使过期的过渡收尾不再摘掉新快照。
         private var handoffGeneration = 0
         private var lastHandoffStart = TimeInterval(0)
@@ -178,10 +188,13 @@ struct ImageViewCanvas: NSViewRepresentable {
                 self.toggleZoom(at: self.visibleCenter())
             }
             clipView.onStep = { [weak self] delta in
-                self?.parent.onStep(delta)
+                self?.stepFromControl(delta)
             }
             clipView.onHorizontalSwipe = { [weak self] step in
-                self?.parent.onStep(step)
+                self?.stepFromControl(step)
+            }
+            clipView.onHorizontalPan = { [weak self] dx, phase, time in
+                self?.handleTrackpadPan(deltaX: dx, phase: phase, timestamp: time) ?? false
             }
             clipView.onLayoutChange = { [weak self] in
                 self?.handleLayout()
@@ -201,7 +214,10 @@ struct ImageViewCanvas: NSViewRepresentable {
                 self?.pan(by: delta)
             }
             imageView.onSwipe = { [weak self] delta in
-                self?.parent.onStep(delta)
+                self?.stepFromControl(delta)
+            }
+            imageView.onSwipePan = { [weak self] dx, ended in
+                self?.handleMousePan(deltaX: dx, ended: ended) ?? false
             }
 
             setupSelfTestHooks()
@@ -328,7 +344,22 @@ struct ImageViewCanvas: NSViewRepresentable {
 
         func applyFile(_ file: ImageFile?) {
             let url = file?.url
-            guard url != currentURL else { return }
+            guard url != currentURL else {
+                notePagingImageReady()
+                return
+            }
+            // 翻页自己提交的那张:真图换到下面,覆盖层继续演,不要再滑一次。
+            let keepOverlay = paging.active && url.map { incoming in
+                paging.pendingURLs.contains { sameFile($0, incoming) }
+            } ?? false
+            if paging.active, !keepOverlay {
+                // 网格点了另一张。这段翻页让路。
+                beginHandoff(restoreImage: true)
+            }
+            pagingPendingCommit = false
+            if keepOverlay, let url {
+                paging.pendingURLs.removeAll { sameFile($0, url) }
+            }
             currentURL = url
             stopAnimation()
             cancelSmoothZoom()
@@ -351,9 +382,13 @@ struct ImageViewCanvas: NSViewRepresentable {
             let maxPixel = displayMaxPixel()
             if let cached = ImageLoader.cachedDisplayImage(url: url, maxPixelSize: maxPixel) {
                 parent.onLoadingChange(false)
-                let outgoing = makeOutgoingSnapshot()
+                let outgoing = keepOverlay ? nil : makeOutgoingSnapshot()
                 setDisplayImage(cached.image, facts: cached.facts, url: url)
-                runEntryTransition(direction: parent.stepDirection, outgoing: outgoing)
+                if keepOverlay {
+                    notePagingImageReady()
+                } else {
+                    runEntryTransition(direction: parent.stepDirection, outgoing: outgoing)
+                }
                 prefetchNeighbors(maxPixel: maxPixel)
                 return
             }
@@ -368,10 +403,15 @@ struct ImageViewCanvas: NSViewRepresentable {
                 guard !Task.isCancelled, self.currentURL == url else { return }
                 self.parent.onLoadingChange(false)
                 if let loaded {
-                    let outgoing = self.makeOutgoingSnapshot()
+                    let outgoing = keepOverlay ? nil : self.makeOutgoingSnapshot()
                     self.setDisplayImage(loaded.image, facts: loaded.facts, url: url)
-                    self.runEntryTransition(direction: self.parent.stepDirection, outgoing: outgoing)
-                } else {
+                    // 翻页还盖着,或者加载期间手指已经按上:只换下面的真图。
+                    if keepOverlay || self.paging.active {
+                        self.notePagingImageReady()
+                    } else {
+                        self.runEntryTransition(direction: self.parent.stepDirection, outgoing: outgoing)
+                    }
+                } else if !self.paging.active {
                     self.beginHandoff(restoreImage: true)
                     self.imageView.image = nil
                     self.parent.onImageInfo(DisplayImageInfo())
@@ -380,8 +420,17 @@ struct ImageViewCanvas: NSViewRepresentable {
             }
         }
 
-        /// 切图过渡。淡入只动新图;交叠滑移先把当前位图留成快照,再让新图滑入。
+        /// 切图过渡。淡入只动新图;整页滑移先把当前位图留成快照,再和邻图一起滑走。
         private func runEntryTransition(direction: Int, outgoing: OutgoingSnapshot?) {
+            // 跟手或松手弹簧还在。真图已经换到下面,覆盖层继续,不要摘。
+            // 方向键和点缩略图会先停掉翻页,不会带着 active 走进来。
+            if paging.active {
+                return
+            }
+            if skipNextEntry || Self.reduceMotion {
+                beginHandoff(restoreImage: true)
+                return
+            }
             switch parent.transition {
             case .fade:
                 beginHandoff(restoreImage: true)
@@ -401,7 +450,7 @@ struct ImageViewCanvas: NSViewRepresentable {
             CATransaction.setDisableActions(false)
             if direction != 0 {
                 let slide = CABasicAnimation(keyPath: "position.x")
-                slide.fromValue = layer.position.x - CGFloat(direction) * 24
+                slide.fromValue = layer.position.x + CGFloat(direction) * 24
                 slide.toValue = layer.position.x
                 slide.duration = 0.25
                 slide.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -424,9 +473,8 @@ struct ImageViewCanvas: NSViewRepresentable {
             CATransaction.commit()
         }
 
-        /// 交叠滑移。有方向:新图不透明,从一侧滑入视口宽度的 8%;旧图停在原位只淡出。
-        /// 旧图再往反方向挪,会在图片另一侧露出一条,看起来像残影。
-        /// 无方向(点缩略图、打开文件夹):只交叉淡化。连按快过上一段时缩到 80ms。
+        /// 相册式整页滑移。有方向:旧图和新图一起走,下一张从右边进来,上一张从左边进来,中间留一条缝。
+        /// 无方向(点缩略图、打开文件夹):只交叉淡化。连按快过上一段时缩短。
         /// 动画放在覆盖层自己的子图层上。图片视图的根图层一旦被平移,不透明画布
         /// 中间几帧不会补画,滑动过程就会拖出残影。
         private func runSlideTransition(direction: Int, outgoing: OutgoingSnapshot?) {
@@ -436,12 +484,6 @@ struct ImageViewCanvas: NSViewRepresentable {
             }
             let generation = beginHandoff(restoreImage: false)
             let duration = nextHandoffDuration(direction: direction)
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            let travel = ImageHandoff.travel(
-                direction: direction,
-                viewportWidth: clipView.bounds.width,
-                backing: backing
-            )
             guard let overlay = makeHandoffOverlay() else {
                 restoreImageViewPresentation()
                 return
@@ -467,38 +509,56 @@ struct ImageViewCanvas: NSViewRepresentable {
             imageView.layer?.opacity = 0
             imageView.layer?.transform = CATransform3DIdentity
             if let oldLayer {
-                oldLayer.opacity = 0
                 overlay.hostLayer.addSublayer(oldLayer)
             }
             overlay.hostLayer.addSublayer(newLayer)
             CATransaction.setDisableActions(false)
-            if direction != 0, travel > 0 {
-                let slide = CABasicAnimation(keyPath: "position.x")
-                slide.fromValue = newLayer.position.x - CGFloat(direction) * travel
-                slide.toValue = newLayer.position.x
-                slide.duration = duration
-                slide.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                slide.fillMode = .backwards
-                newLayer.add(slide, forKey: "entrySlide")
+            let timing = CAMediaTimingFunction(name: .easeOut)
+            if direction != 0 {
+                let width = clipView.bounds.width
+                let incoming = ImageHandoff.pageOffset(direction: direction, viewportWidth: width)
+                let outgoingShift = ImageHandoff.commitTranslation(direction: direction, viewportWidth: width)
+                addSlide(on: newLayer, from: newLayer.position.x + incoming, to: newLayer.position.x, duration: duration, timing: timing)
+                if let oldLayer {
+                    addSlide(
+                        on: oldLayer,
+                        from: oldLayer.position.x,
+                        to: oldLayer.position.x + outgoingShift,
+                        duration: duration,
+                        timing: timing
+                    )
+                }
             } else {
                 let fade = CABasicAnimation(keyPath: "opacity")
                 fade.fromValue = 0.0
                 fade.toValue = 1.0
                 fade.duration = duration
-                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                fade.timingFunction = timing
                 fade.fillMode = .backwards
                 newLayer.add(fade, forKey: "entryFade")
-            }
-            if let oldLayer {
-                let fade = CABasicAnimation(keyPath: "opacity")
-                fade.fromValue = 1.0
-                fade.toValue = 0.0
-                fade.duration = duration
-                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                fade.fillMode = .backwards
-                oldLayer.add(fade, forKey: "entryFade")
+                if let oldLayer {
+                    let fadeOut = CABasicAnimation(keyPath: "opacity")
+                    fadeOut.fromValue = 1.0
+                    fadeOut.toValue = 0.0
+                    fadeOut.duration = duration
+                    fadeOut.timingFunction = timing
+                    fadeOut.fillMode = .backwards
+                    oldLayer.add(fadeOut, forKey: "entryFade")
+                }
             }
             CATransaction.commit()
+        }
+
+        /// 显式位移动画。必须在关闭了隐式动作之后再挂上,否则这一段会被事务吃掉,画面直接跳到终点。
+        private func addSlide(on layer: CALayer, from: CGFloat, to: CGFloat, duration: TimeInterval, timing: CAMediaTimingFunction) {
+            let slide = CABasicAnimation(keyPath: "position.x")
+            slide.fromValue = from
+            slide.toValue = to
+            slide.duration = duration
+            slide.timingFunction = timing
+            slide.fillMode = .both
+            slide.isRemovedOnCompletion = false
+            layer.add(slide, forKey: "entrySlide")
         }
 
         /// 换图前抓住当前位图和它所在的文档位置。淡入模式不需要快照。
@@ -578,6 +638,9 @@ struct ImageViewCanvas: NSViewRepresentable {
         @discardableResult
         private func beginHandoff(restoreImage: Bool) -> Int {
             handoffGeneration += 1
+            paging = Paging()
+            pagingPendingCommit = false
+            skipNextEntry = false
             handoffOverlay?.removeFromSuperview()
             handoffOverlay = nil
             if restoreImage { restoreImageViewPresentation() }
@@ -603,8 +666,556 @@ struct ImageViewCanvas: NSViewRepresentable {
             CATransaction.commit()
         }
 
+        /// 跟手翻页已经交出去、但这帧选中图没变:手势落空,把覆盖层收掉。
+        func resolvePagingCommit(_ url: URL?) {
+            guard pagingPendingCommit, !paging.active, url == currentURL else { return }
+            pagingPendingCommit = false
+            skipNextEntry = false
+            beginHandoff(restoreImage: true)
+        }
+
+        private static var reduceMotion: Bool {
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        }
+
+        /// 图片没有横向溢出时才跟手。放大后的横拖仍是平移。
+        private var canPageInteractively: Bool {
+            guard parent.transition == .slide, imageView.image != nil, !Self.reduceMotion else { return false }
+            return imageView.frame.width <= clipView.bounds.width + 0.5
+        }
+
+        func handleTrackpadPan(deltaX: CGFloat, phase: NSEvent.Phase, timestamp: TimeInterval) -> Bool {
+            let began = phase.contains(.began)
+            let ended = phase.contains(.ended)
+            let cancelled = phase.contains(.cancelled)
+            if paging.settling {
+                // 手指又按上或又拖了:停在当前这一帧。已经翻过去的那张改成当前图,才能接着滑。
+                if began || deltaX != 0 {
+                    interruptPaging()
+                } else {
+                    return true
+                }
+            }
+            guard canPageInteractively || paging.active else {
+                // 覆盖层还盖着、但这张图已经不能跟手:把真图露出来,避免画面停在旧的一帧上。
+                if handoffOverlay != nil { beginHandoff(restoreImage: true) }
+                return false
+            }
+            // deltaX 是手指位移:> 0 手指向右。整条画布跟着手走。
+            // 相位有时会叠着别的标记,不能用全等,否则这段事件会被漏掉。
+            if cancelled && !began && !phase.contains(.changed) {
+                if paging.active { endPaging(cancelled: true) }
+                return true
+            }
+            if ended && !began {
+                guard paging.active else { return false }
+                if deltaX != 0 { notePaging(delta: deltaX, time: timestamp) }
+                else if paging.lastTime > 0, timestamp - paging.lastTime > 0.08 {
+                    paging.velocity = 0
+                }
+                endPaging(cancelled: false)
+                return true
+            }
+            if !paging.active {
+                guard startPaging() else {
+                    if handoffOverlay != nil { beginHandoff(restoreImage: true) }
+                    return false
+                }
+            }
+            if deltaX != 0 { notePaging(delta: deltaX, time: timestamp) }
+            refreshPagingLayers()
+            return true
+        }
+
+        func handleMousePan(deltaX: CGFloat, ended: Bool) -> Bool {
+            if paging.settling {
+                if ended || deltaX == 0 { return true }
+                interruptPaging()
+            }
+            guard canPageInteractively || paging.active else { return false }
+            if ended {
+                guard paging.active else { return true }
+                endPaging(cancelled: false)
+                return true
+            }
+            if !paging.active {
+                guard startPaging() else { return false }
+            }
+            if deltaX != 0 { notePaging(delta: deltaX, time: CACurrentMediaTime()) }
+            refreshPagingLayers()
+            return true
+        }
+
+        private func startPaging() -> Bool {
+            guard canPageInteractively, let contents = imageView.layer?.contents else { return false }
+            handoffGeneration += 1
+            let generation = handoffGeneration
+            handoffOverlay?.removeFromSuperview()
+            handoffOverlay = nil
+            guard let overlay = makeHandoffOverlay() else { return false }
+            let scale = imageView.layer?.contentsScale ?? (scrollView.window?.backingScaleFactor ?? 2)
+            let rect = viewportRect(forImageFrame: imageView.frame, boundsOrigin: clipView.bounds.origin)
+            let current = pictureLayer(contents: contents, scale: scale, rect: rect)
+            // 三张图直接挂在覆盖层上,和方向键那次滑移同一条能画出来的路径。
+            // 中间再套一层画布时,位移加在那层上,屏幕上的图不动,拖起来就像卡住。
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            overlay.hostLayer.addSublayer(current)
+            imageView.alphaValue = 0
+            imageView.layer?.opacity = 0
+            CATransaction.commit()
+            skipNextEntry = false
+            pagingPendingCommit = false
+            paging = Paging(
+                active: true,
+                generation: generation,
+                currentLayer: current,
+                currentBase: current.position.x
+            )
+            paging.displayedURL = currentURL
+            // 左右两张先摆上。整段手势都留着,过零也不摘,滑的时候才像在拖一块已经排好的画布。
+            ensureNeighbor(direction: -1)
+            ensureNeighbor(direction: 1)
+            prefetchNeighbors(maxPixel: displayMaxPixel())
+            return true
+        }
+
+        private func notePaging(delta: CGFloat, time: TimeInterval) {
+            if paging.lastTime > 0 {
+                let dt = time - paging.lastTime
+                if dt > 0.001, dt < 0.05 {
+                    let sample = delta / CGFloat(dt)
+                    // 最近一次权重大,松手速度跟得上甩动,而不是慢半拍。
+                    paging.velocity = paging.velocity * 0.3 + sample * 0.7
+                } else if dt >= 0.05 {
+                    paging.velocity = 0
+                }
+            }
+            paging.lastTime = time
+            paging.rawTranslation += delta
+        }
+
+        /// 方向键、鼠标阈值横滑。正在跟手时先停掉,避免弹簧还在播又被摘层。
+        private func stepFromControl(_ direction: Int) {
+            if paging.active {
+                beginHandoff(restoreImage: true)
+            }
+            parent.neighbors = parent.onStep(direction)
+        }
+
+        private func sameFile(_ a: URL?, _ b: URL?) -> Bool {
+            switch (a, b) {
+            case (nil, nil):
+                return true
+            case let (lhs?, rhs?):
+                return lhs.standardizedFileURL == rhs.standardizedFileURL
+            default:
+                return false
+            }
+        }
+
+        /// 弹回或翻页的弹簧还没停时,手指又按上了:停在当前这一帧,改回跟手。
+        /// 已经提交的那张变成新的当前图,否则下一次滑动还顶在旧页面的尽头上。
+        private func interruptPaging() {
+            guard paging.active, paging.settling, paging.currentLayer != nil else { return }
+            let shift = currentVisualShift()
+            handoffGeneration += 1
+            paging.generation = handoffGeneration
+            let slots = paging.slots
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for slot in slots {
+                slot.layer.removeAnimation(forKey: "paging")
+                slot.layer.position.x = slot.base + shift
+            }
+            CATransaction.commit()
+            paging.settling = false
+            paging.release = nil
+            paging.velocity = 0
+            paging.lastTime = 0
+            if paging.committedDirection != 0 {
+                rebaseCommittedPage(shift: shift)
+            } else {
+                paging.rawTranslation = shift
+                paging.presented = shift
+                paging.grabbedFromCommit = false
+            }
+        }
+
+        /// 松手时已经翻过去的那张,接住后就是当前图。位移改到以它为 0,画面不跳。
+        private func rebaseCommittedPage(shift: CGFloat) {
+            let direction = paging.committedDirection
+            guard direction != 0 else { return }
+            let width = clipView.bounds.width
+            let commitT = ImageHandoff.commitTranslation(direction: direction, viewportWidth: width)
+            let incoming = direction > 0 ? paging.nextLayer : paging.previousLayer
+            guard let incoming else {
+                // 邻图还没解码出来。先按旧画布跟手,松手只把这次翻页送完,不再连翻。
+                paging.needsRebuild = true
+                paging.rebaseDirection = direction
+                paging.rebuildCommit = commitT
+                paging.committedDirection = 0
+                paging.restingTranslation = commitT
+                paging.rawTranslation = shift
+                paging.presented = shift
+                paging.grabbedFromCommit = true
+                paging.grabTranslation = shift
+                return
+            }
+            paging.committedDirection = 0
+            applyRebase(shift: shift, commitTranslation: commitT, direction: direction, incoming: incoming)
+        }
+
+        private func tryRebasePending() {
+            guard paging.needsRebuild, !paging.settling, paging.rebaseDirection != 0 else { return }
+            let direction = paging.rebaseDirection
+            let incoming = direction > 0 ? paging.nextLayer : paging.previousLayer
+            guard let incoming else { return }
+            let shift = paging.presented
+            let commitT = paging.rebuildCommit
+            paging.needsRebuild = false
+            paging.rebaseDirection = 0
+            applyRebase(shift: shift, commitTranslation: commitT, direction: direction, incoming: incoming)
+        }
+
+        private func applyRebase(shift: CGFloat, commitTranslation: CGFloat, direction: Int, incoming: CALayer) {
+            let width = clipView.bounds.width
+            let newTranslation = ImageHandoff.translationAfterCommittedInterrupt(
+                shift: shift,
+                commitTranslation: commitTranslation
+            )
+            let oldCurrent = paging.currentLayer
+            let centerBase = paging.currentBase
+            let outgoing = direction > 0 ? paging.previousLayer : paging.nextLayer
+
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            outgoing?.removeFromSuperlayer()
+            if let oldCurrent, let host = (handoffOverlay as? HandoffOverlay)?.hostLayer, oldCurrent !== incoming {
+                host.insertSublayer(oldCurrent, below: incoming)
+            }
+            CATransaction.commit()
+
+            let sideBase = centerBase + ImageHandoff.pageOffset(direction: -direction, viewportWidth: width)
+            if direction > 0 {
+                paging.previousLayer = oldCurrent
+                paging.previousBase = sideBase
+                paging.previousURL = paging.originURL
+                paging.nextLayer = nil
+                paging.nextBase = 0
+                paging.nextURL = nil
+            } else {
+                paging.nextLayer = oldCurrent
+                paging.nextBase = sideBase
+                paging.nextURL = paging.originURL
+                paging.previousLayer = nil
+                paging.previousBase = 0
+                paging.previousURL = nil
+            }
+            paging.currentLayer = incoming
+            paging.currentBase = centerBase
+            paging.displayedURL = paging.committedURL ?? paging.displayedURL
+            paging.committedDirection = 0
+            paging.restingTranslation = 0
+            paging.needsRebuild = false
+            paging.rebaseDirection = 0
+            paging.rawTranslation = newTranslation
+            paging.presented = newTranslation
+            paging.velocity = 0
+            paging.grabbedFromCommit = true
+            paging.grabTranslation = newTranslation
+            applyPagingTranslation(newTranslation)
+            syncPagingNeighbors()
+        }
+
+        /// 画布已经以新图为当前张之后,按现在的邻居补上缺的一侧。弹簧还按旧三条在走时不能调用。
+        private func syncPagingNeighbors() {
+            guard paging.active, !paging.settling, paging.committedDirection == 0, !paging.needsRebuild,
+                  paging.currentLayer != nil else { return }
+            let previous = parent.neighbors.previous
+            let next = parent.neighbors.next
+            if !sameFile(paging.previousURL, previous) {
+                paging.previousLayer?.removeFromSuperlayer()
+                paging.previousLayer = nil
+                paging.previousURL = nil
+                paging.previousBase = 0
+            }
+            if !sameFile(paging.nextURL, next) {
+                paging.nextLayer?.removeFromSuperlayer()
+                paging.nextLayer = nil
+                paging.nextURL = nil
+                paging.nextBase = 0
+            }
+            if previous != nil { ensureNeighbor(direction: -1) }
+            if next != nil { ensureNeighbor(direction: 1) }
+        }
+
+        /// 选中已经落到新图、并且手指又按上了:把缺的邻图补上。弹簧没停、旧三条还在时不动。
+        private func notePagingImageReady() {
+            guard paging.active, !paging.settling, paging.committedDirection == 0 else { return }
+            if paging.needsRebuild {
+                tryRebasePending()
+            }
+            if !paging.needsRebuild {
+                syncPagingNeighbors()
+            }
+        }
+
+        private func currentVisualShift() -> CGFloat {
+            guard let current = paging.currentLayer else { return paging.presented }
+            let x = current.presentation()?.position.x ?? current.position.x
+            return x - paging.currentBase
+        }
+
+        private func refreshPagingLayers() {
+            let shown = ImageHandoff.presentedTranslation(
+                raw: paging.rawTranslation,
+                viewportWidth: clipView.bounds.width,
+                hasNext: parent.neighbors.next != nil,
+                hasPrevious: parent.neighbors.previous != nil
+            )
+            paging.presented = shown
+            applyPagingTranslation(shown)
+        }
+
+        /// 每张图从自己的基准位置平移同一段。正值往右,露出上一张。
+        private func applyPagingTranslation(_ translation: CGFloat) {
+            guard paging.currentLayer != nil else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for slot in paging.slots {
+                slot.layer.position.x = slot.base + translation
+            }
+            CATransaction.commit()
+        }
+
+        /// 邻图固定摆在画布两侧。后解码完也只是补进这一格,不另做一段滑入。
+        private func ensureNeighbor(direction: Int) {
+            guard direction != 0, paging.currentLayer != nil,
+                  let url = parent.neighbors.url(direction: direction) else { return }
+            if direction > 0, paging.nextLayer != nil { return }
+            if direction < 0, paging.previousLayer != nil { return }
+            let maxPixel = displayMaxPixel()
+            if let cached = ImageLoader.cachedDisplayImage(url: url, maxPixelSize: maxPixel),
+               let cg = cached.image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                installNeighbor(cg: cg, imageSize: cached.image.size, direction: direction, url: url)
+                return
+            }
+            guard !paging.loadingDirections.contains(direction) else { return }
+            paging.loadingDirections.insert(direction)
+            Task { @MainActor [weak self] in
+                let loaded = await ImageLoader.displayImage(url: url, maxPixelSize: maxPixel)
+                guard let self else { return }
+                self.paging.loadingDirections.remove(direction)
+                guard self.paging.active else { return }
+                if direction > 0, self.paging.nextLayer != nil { return }
+                if direction < 0, self.paging.previousLayer != nil { return }
+                let wanted = self.parent.neighbors.url(direction: direction)
+                let fillingCommit = (self.paging.committedDirection == direction && self.sameFile(url, self.paging.committedURL))
+                    || (self.paging.needsRebuild && self.paging.rebaseDirection == direction && self.sameFile(url, self.paging.committedURL))
+                guard self.sameFile(wanted, url) || fillingCommit else {
+                    if wanted != nil { self.ensureNeighbor(direction: direction) }
+                    return
+                }
+                guard let loaded,
+                      let cg = loaded.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+                self.installNeighbor(cg: cg, imageSize: loaded.image.size, direction: direction, url: url)
+            }
+        }
+
+        private func installNeighbor(cg: CGImage, imageSize: CGSize, direction: Int, url: URL) {
+            guard paging.currentLayer != nil, let overlay = handoffOverlay as? HandoffOverlay else { return }
+            let viewport = overlay.bounds.size
+            guard viewport.width > 1, viewport.height > 1 else { return }
+            let backing = scrollView.window?.backingScaleFactor ?? 2
+            var rect = ImageHandoff.fittedRect(imageSize: imageSize, viewport: viewport, backing: backing)
+            rect.origin.x += ImageHandoff.pageOffset(direction: direction, viewportWidth: viewport.width)
+            let layer = pictureLayer(contents: cg, scale: backing, rect: rect)
+            let base = layer.position.x
+            let host = overlay.hostLayer
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if let current = paging.currentLayer {
+                host.insertSublayer(layer, below: current)
+            } else {
+                host.addSublayer(layer)
+            }
+            if direction > 0 {
+                paging.nextLayer = layer
+                paging.nextBase = base
+                paging.nextURL = url
+            } else {
+                paging.previousLayer = layer
+                paging.previousBase = base
+                paging.previousURL = url
+            }
+            if paging.settling {
+                layer.position.x = base + paging.targetTranslation
+            } else {
+                layer.position.x = base + paging.presented
+            }
+            CATransaction.commit()
+            // 弹簧已经在走:从松手那一帧的位置接上同一条曲线,避免后到的邻图从旁边跳进来。
+            if paging.settling, let release = paging.release {
+                addPagingSpring(
+                    on: layer,
+                    from: base + paging.releaseTranslation,
+                    to: base + paging.targetTranslation,
+                    release: release,
+                    duration: paging.springDuration,
+                    beginTime: paging.animationStart
+                )
+            }
+            if paging.needsRebuild {
+                tryRebasePending()
+            }
+        }
+
+        private func endPaging(cancelled: Bool) {
+            guard paging.active, !paging.settling else { return }
+            let generation = paging.generation
+            let width = clipView.bounds.width
+            var direction = 0
+            if !cancelled, !paging.needsRebuild {
+                let translation = ImageHandoff.pagingDecisionTranslation(
+                    presented: paging.presented,
+                    grabbedFromCommit: paging.grabbedFromCommit,
+                    grabTranslation: paging.grabTranslation
+                )
+                direction = ImageHandoff.commitDirection(
+                    translation: translation,
+                    velocity: paging.velocity,
+                    viewportWidth: width
+                )
+                if parent.neighbors.url(direction: direction) == nil { direction = 0 }
+            }
+            paging.grabbedFromCommit = false
+            if direction != 0 {
+                ensureNeighbor(direction: direction)
+                let leaving = paging.displayedURL ?? currentURL
+                let arriving = parent.neighbors.url(direction: direction)
+                paging.committedDirection = direction
+                paging.originURL = leaving
+                paging.committedURL = arriving
+                paging.displayedURL = arriving ?? paging.displayedURL
+                paging.restingTranslation = 0
+                if let arriving {
+                    paging.pendingURLs.append(arriving)
+                    if paging.pendingURLs.count > 8 {
+                        paging.pendingURLs.removeFirst(paging.pendingURLs.count - 8)
+                    }
+                }
+                // 先标成弹簧,同步进来的刷新才不会把覆盖层摘掉。选中马上换,不等弹簧停。
+                paging.settling = true
+                if arriving != nil {
+                    parent.neighbors = parent.onStep(direction)
+                }
+            } else {
+                paging.committedDirection = 0
+                paging.settling = true
+            }
+            let target = direction == 0
+                ? paging.restingTranslation
+                : ImageHandoff.commitTranslation(direction: direction, viewportWidth: width)
+            let velocity = max(-8000, min(8000, paging.velocity))
+            animatePaging(to: target, velocity: velocity) { [weak self] in
+                self?.finishPaging(generation: generation, direction: direction)
+            }
+        }
+
+        private func animatePaging(to translation: CGFloat, velocity: CGFloat, completion: @escaping () -> Void) {
+            guard paging.currentLayer != nil else {
+                completion()
+                return
+            }
+            let fromTranslation = currentVisualShift()
+            let release = ImageHandoff.pagingRelease(distance: translation - fromTranslation, velocity: velocity)
+            let probe = makePagingSpring(from: fromTranslation, to: translation, release: release)
+            let duration = max(probe.settlingDuration, 0.01)
+            paging.release = release
+            paging.releaseTranslation = fromTranslation
+            paging.targetTranslation = translation
+            paging.springDuration = duration
+            paging.animationStart = CACurrentMediaTime()
+            let slots = paging.slots
+            // 模型先放到终点。显式弹簧要在关掉隐式动作的事务之外再挂,否则这一段会被吃掉,画面直接跳到终点。
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for slot in slots {
+                slot.layer.position.x = slot.base + translation
+            }
+            CATransaction.commit()
+            for slot in slots {
+                addPagingSpring(
+                    on: slot.layer,
+                    from: slot.base + fromTranslation,
+                    to: slot.base + translation,
+                    release: release,
+                    duration: duration,
+                    beginTime: nil
+                )
+            }
+            let nanos = UInt64((duration + 0.02) * 1_000_000_000)
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: nanos)
+                completion()
+            }
+        }
+
+        private func makePagingSpring(from: CGFloat, to: CGFloat, release: ImageHandoff.PagingRelease) -> CASpringAnimation {
+            let spring = CASpringAnimation(perceptualDuration: release.perceptualDuration, bounce: release.bounce)
+            spring.keyPath = "position.x"
+            spring.fromValue = from
+            spring.toValue = to
+            spring.initialVelocity = release.initialVelocity
+            spring.fillMode = .both
+            spring.isRemovedOnCompletion = false
+            return spring
+        }
+
+        /// `beginTime` 用松手那一刻,后装上的邻图才能落在同一帧,而不是从头再滑一遍。
+        private func addPagingSpring(
+            on layer: CALayer,
+            from: CGFloat,
+            to: CGFloat,
+            release: ImageHandoff.PagingRelease,
+            duration: CFTimeInterval,
+            beginTime: CFTimeInterval?
+        ) {
+            let spring = makePagingSpring(from: from, to: to, release: release)
+            spring.duration = duration
+            if let beginTime {
+                spring.beginTime = beginTime
+            }
+            layer.add(spring, forKey: "paging")
+        }
+
+        private func finishPaging(generation: Int, direction: Int) {
+            guard handoffGeneration == generation, paging.settling else { return }
+            let stepped = paging.committedDirection != 0
+            paging = Paging()
+            if direction == 0 || stepped {
+                // 选中在松手时已经换过。这里只揭开下面那张,不再翻一次。
+                beginHandoff(restoreImage: true)
+                return
+            }
+            skipNextEntry = true
+            pagingPendingCommit = true
+            let urlBefore = currentURL
+            let handoff = handoffGeneration
+            parent.neighbors = parent.onStep(direction)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                guard let self,
+                      self.pagingPendingCommit,
+                      self.currentURL == urlBefore,
+                      self.handoffGeneration == handoff else { return }
+                self.beginHandoff(restoreImage: true)
+            }
+        }
+
         private func prefetchNeighbors(maxPixel: CGFloat) {
-            let urls = parent.neighborURLs
+            let urls = parent.neighbors.urls
             guard !urls.isEmpty else { return }
             for url in urls {
                 ImageLoader.prefetchDisplay(url: url, maxPixelSize: maxPixel)
@@ -1188,6 +1799,7 @@ struct ImageViewCanvas: NSViewRepresentable {
         /// 图片未就绪时返回 false(调用方保留差额,待就绪后重试)。
         @discardableResult
         func performRotate() -> Bool {
+            if paging.active { beginHandoff(restoreImage: true) }
             guard imageView.image != nil,
                   let cg = imageView.image?.cgImage(forProposedRect: nil, context: nil, hints: nil),
                   let rotated = ImageLoader.rotatedCW90(cg) else { return false }
@@ -1207,6 +1819,72 @@ struct ImageViewCanvas: NSViewRepresentable {
             debugLog("performRotate applied")
             return true
         }
+    }
+}
+
+/// 跟手翻页这一下的位移和图层。只在主线程读写。
+/// 上一张、当前、下一张都直接挂在覆盖层上,手指把它们一起平移。
+private struct Paging {
+    var active = false
+    var settling = false
+    var generation = 0
+    var rawTranslation: CGFloat = 0
+    var presented: CGFloat = 0
+    var velocity: CGFloat = 0
+    var lastTime: TimeInterval = 0
+    var currentLayer: CALayer?
+    var previousLayer: CALayer?
+    var nextLayer: CALayer?
+    /// 位移为 0 时各图的 position.x。
+    var currentBase: CGFloat = 0
+    var previousBase: CGFloat = 0
+    var nextBase: CGFloat = 0
+    /// 松手那一帧的位移,和弹簧要去的位移。后到的邻图用同一段曲线补上。
+    var releaseTranslation: CGFloat = 0
+    var targetTranslation: CGFloat = 0
+    var release: ImageHandoff.PagingRelease?
+    var springDuration: CFTimeInterval = 0
+    var animationStart: CFTimeInterval = 0
+    var loadingDirections: Set<Int> = []
+    /// 松手时已经交给列表的方向。非 0 表示三条图还是翻页前的,弹簧正在把邻图送到中间。
+    var committedDirection: Int = 0
+    /// 这条画布上居中的那张。SwiftUI 可能还没刷新,不能只看 currentURL。
+    var displayedURL: URL?
+    /// 这次提交离开的那张。接住之后它变成另一侧的邻图。
+    var originURL: URL?
+    /// 这次提交要落到的那张。
+    var committedURL: URL?
+    var previousURL: URL?
+    var nextURL: URL?
+    /// 翻页自己提交过、画布还没消化的 URL。这些刷新不能再播一段滑入,也不能摘掉覆盖层。
+    var pendingURLs: [URL] = []
+    /// 弹簧没停时又按住,并且已经把刚翻到的那张当成当前图。
+    /// 下一次松手按相对接住点的位移算,不能把没走完的弹簧当成往回翻。
+    var grabbedFromCommit = false
+    var grabTranslation: CGFloat = 0
+    /// 不再翻页时弹簧要停的位置。邻图还没装上时停在这次提交的落点,而不是旧图中心。
+    var restingTranslation: CGFloat = 0
+    var needsRebuild = false
+    var rebaseDirection: Int = 0
+    var rebuildCommit: CGFloat = 0
+
+    struct Slot {
+        var layer: CALayer
+        var base: CGFloat
+    }
+
+    var slots: [Slot] {
+        var result: [Slot] = []
+        if let currentLayer {
+            result.append(Slot(layer: currentLayer, base: currentBase))
+        }
+        if let previousLayer {
+            result.append(Slot(layer: previousLayer, base: previousBase))
+        }
+        if let nextLayer {
+            result.append(Slot(layer: nextLayer, base: nextBase))
+        }
+        return result
     }
 }
 
@@ -1288,6 +1966,8 @@ final class CanvasClipView: NSClipView {
     var onSmartZoom: (() -> Void)?
     /// 横滑切图提交。方向语义全项目统一:+1 = 下一张,-1 = 上一张
     var onHorizontalSwipe: ((Int) -> Void)?
+    /// 跟手翻页。返回 true 表示这次触控板横滑已接管,不再走阈值提交。
+    var onHorizontalPan: ((CGFloat, NSEvent.Phase, TimeInterval) -> Bool)?
     /// applyDocument 写入期间锁定 origin,防止 constrain 在同一拍改掉取景
     var pinnedOrigin: NSPoint?
     /// 画布背景(随偏好设置切换)。值没变就别置脏,否则每次 updateNSView 都会整块重绘。
@@ -1298,6 +1978,10 @@ final class CanvasClipView: NSClipView {
     private var swipeAccumulatedDX: CGFloat = 0
     private var swipeGestureActive = false
     private var swipeCommittedThisGesture = false
+    /// 滚动事件已经接住跟手翻页。松手的 .ended 还要送进去。
+    private var pagingGestureActive = false
+    /// 松手后的惯性不再交给滚动视图。
+    private var swallowPagingMomentum = false
     /// 提交防抖:两次提交至少间隔此秒数,兜住异常事件流(如未发 .ended 的手势)
     private var lastSwipeCommitTime = TimeInterval(0)
     private static let horizontalSwipeThreshold: CGFloat = 55
@@ -1343,14 +2027,48 @@ final class CanvasClipView: NSClipView {
         // 其余(纵向滚动、惯性余量)交给系统滚动。
         let dx = event.scrollingDeltaX
         let dy = event.scrollingDeltaY
-        if abs(dx) > abs(dy) * 2, abs(dx) > 0.5,
+        // 翻页跟手指,不跟系统「自然滚动」。panX > 0 是手指向右。
+        let panX = ImageHandoff.trackpadFingerDelta(dx, naturalScrolling: event.isDirectionInvertedFromDevice)
+        let fingerDown = event.phase.intersection([.began, .stationary, .changed, .ended, .cancelled]) != []
+        let momentum = event.momentumPhase != []
+        // 手指还在板上就清掉上一段惯性。否则连滑两三张后,新手势仍带着 momentum 标记,位移被整段丢掉,要等惯性结束才又动。
+        if fingerDown {
+            swallowPagingMomentum = false
+        }
+        // 上一段如果没收到松手,不能让它一直把后面的滚动都接走。
+        if event.phase.contains(.began) { pagingGestureActive = false }
+        if !fingerDown, ImageHandoff.shouldSwallowPagingMomentum(
+            fingerDown: false, momentum: momentum, armed: swallowPagingMomentum
+        ) {
+            if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+                swallowPagingMomentum = false
+            }
+            return
+        }
+        let horizontal = abs(dx) > abs(dy) * 1.35 && abs(dx) > 0.4
+        let ending = event.phase.contains(.ended) || event.phase.contains(.cancelled)
+        if ImageHandoff.shouldTrackPagingScroll(
+            fingerDown: fingerDown,
+            momentum: momentum,
+            horizontal: horizontal,
+            gestureActive: pagingGestureActive,
+            documentScrollsHorizontally: isDocumentHorizontallyScrollable
+        ) {
+            if onHorizontalPan?(panX, event.phase, event.timestamp) == true {
+                pagingGestureActive = !ending
+                // 只在松手后吞惯性。移动过程中也吞的话,紧接着那批带 momentum 的事件会把这次滑动吃掉。
+                if ending { swallowPagingMomentum = true }
+                return
+            }
+            if ending { pagingGestureActive = false }
+        }
+        if abs(dx) > abs(dy) * 1.35, abs(dx) > 0.4,
            !isDocumentHorizontallyScrollable,
            event.phase != .ended, event.momentumPhase == [] {
             swipeGestureActive = true
-            swipeAccumulatedDX += dx
+            swipeAccumulatedDX += panX
             // 一个手势只提交一张 + 两次提交至少隔 0.3s,双保险防长滑连切。
-            // 从左往右滑 = 下一张,从右往左滑 = 上一张。
-            // 自然滚动下 dx>0 是内容左移(手指向左),所以取上一张。
+            // 累积值已经是手指方向:向右 = 上一张,向左 = 下一张。
             let now = CACurrentMediaTime()
             if !swipeCommittedThisGesture,
                now - lastSwipeCommitTime >= Self.swipeCommitMinInterval,
@@ -1473,6 +2191,8 @@ final class CanvasImageView: NSImageView {
     var onPan: ((CGSize) -> Void)?
     /// 滑动切图提交。方向语义全项目统一:+1 = 下一张,-1 = 上一张
     var onSwipe: ((Int) -> Void)?
+    /// 跟手拖拽。返回 true 表示已接管,松手不再按阈值另交一张。
+    var onSwipePan: ((CGFloat, Bool) -> Bool)?
 
     private enum DragMode { case undecided, pan, swipe }
     private var dragMode: DragMode = .undecided
@@ -1572,13 +2292,18 @@ final class CanvasImageView: NSImageView {
             // 横向主导且图片水平方向没有可滚动余量 → 滑动切图;其余一律平移
             if absX > absY && !isHorizontallyOverflowing {
                 dragMode = .swipe
+                // 判定前那几像素也算上,否则图片会一直落在光标后面。
+                lastDragPoint = start
             } else {
                 dragMode = .pan
             }
         }
         switch dragMode {
         case .swipe:
-            swipeTotalDX += current.x - last.x
+            let dx = current.x - last.x
+            if onSwipePan?(dx, false) != true {
+                swipeTotalDX += dx
+            }
         case .pan:
             onPan?(CGSize(width: current.x - last.x, height: current.y - last.y))
         case .undecided:
@@ -1589,9 +2314,11 @@ final class CanvasImageView: NSImageView {
 
     override func mouseUp(with event: NSEvent) {
         defer { resetDragState() }
-        guard dragMode == .swipe, abs(swipeTotalDX) >= Self.swipeCommitThreshold else { return }
-        // 从左往右拖(dx>0)= 下一张,向左拖 = 上一张。与触控板横滑同一方向。
-        onSwipe?(swipeTotalDX > 0 ? 1 : -1)
+        guard dragMode == .swipe else { return }
+        if onSwipePan?(0, true) == true { return }
+        guard abs(swipeTotalDX) >= Self.swipeCommitThreshold else { return }
+        // 跟相册一样:往右拖 = 上一张,往左拖 = 下一张。与触控板横滑同一方向。
+        onSwipe?(swipeTotalDX > 0 ? -1 : 1)
     }
 
     private func resetDragState() {
