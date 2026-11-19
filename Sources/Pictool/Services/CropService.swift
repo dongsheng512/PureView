@@ -289,6 +289,43 @@ enum CropFormat: String, CaseIterable, Identifiable {
     }
 }
 
+/// 导出尺寸缩放预设。
+enum ExportResizePreset: String, CaseIterable, Identifiable, Sendable {
+    case original = "原尺寸"
+    case percent75 = "75%"
+    case percent50 = "50%"
+    case max1920 = "长边 1920px"
+    case max1280 = "长边 1280px"
+    case custom = "自定义长边"
+    var id: String { rawValue }
+
+    /// 计算导出给 `CropTransform.downscaled` 的最大长边像素；nil 表示不缩放。
+    func maxLongestSide(sourcePixelSize: CGSize, customPixels: Int) -> Int? {
+        let longest = max(sourcePixelSize.width, sourcePixelSize.height)
+        guard longest > 0 else { return nil }
+        switch self {
+        case .original: return nil
+        case .percent75: return max(1, Int((longest * 0.75).rounded()))
+        case .percent50: return max(1, Int((longest * 0.50).rounded()))
+        case .max1920: return 1920
+        case .max1280: return 1280
+        case .custom: return customPixels > 0 ? customPixels : nil
+        }
+    }
+
+    /// 预估缩放后的输出像素宽高（与 `CropTransform.downscaled` 口径一致）。
+    func outputPixelSize(sourcePixelSize: CGSize, customPixels: Int) -> CGSize {
+        let w = max(1, sourcePixelSize.width.rounded())
+        let h = max(1, sourcePixelSize.height.rounded())
+        guard let cap = maxLongestSide(sourcePixelSize: CGSize(width: w, height: h), customPixels: customPixels),
+              max(w, h) > CGFloat(cap) else {
+            return CGSize(width: w, height: h)
+        }
+        let k = CGFloat(cap) / max(w, h)
+        return CGSize(width: max(1, (w * k).rounded()), height: max(1, (h * k).rounded()))
+    }
+}
+
 /// 几何变换(纯函数,单测覆盖):四分旋转、翻转、拉直、按最长边降采样。
 /// 全部输出"已经摆正"的位图,选区归一化坐标始终基于变换后的图幅。
 enum CropTransform {
@@ -416,6 +453,7 @@ enum CropService {
                        flipH: Bool = false,
                        flipV: Bool = false,
                        straightenDegrees: Double = 0,
+                       adjustments: ImageAdjustments = ImageAdjustments(),
                        maxLongestSide: Int? = nil,
                        maxDecodePixel: CGFloat? = nil,
                        annotations: [Annotation] = [],
@@ -434,6 +472,7 @@ enum CropService {
             to: full, quarterTurns: quarterTurns, flipH: flipH, flipV: flipV,
             straightenDegrees: straightenDegrees
         )
+        canvas = ImageAdjustmentService.apply(adjustments, to: canvas)
         if !annotations.isEmpty {
             let size = CGSize(width: canvas.width, height: canvas.height)
             if let ctx = CGContext(
@@ -479,14 +518,17 @@ enum CropService {
                        flipH: Bool = false,
                        flipV: Bool = false,
                        straightenDegrees: Double = 0,
+                       adjustments: ImageAdjustments = ImageAdjustments(),
                        maxLongestSide: Int? = nil,
                        includeGPS: Bool = true,
+                       stripMetadata: Bool = false,
                        annotations: [Annotation] = [],
                        watermark: WatermarkSettings? = nil) throws -> Data {
         let finalOutput = try render(
             sourceURL: sourceURL, normalizedRect: normalizedRect,
             quarterTurns: quarterTurns, flipH: flipH, flipV: flipV,
-            straightenDegrees: straightenDegrees, maxLongestSide: maxLongestSide,
+            straightenDegrees: straightenDegrees, adjustments: adjustments,
+            maxLongestSide: maxLongestSide,
             annotations: annotations, watermark: watermark
         )
 
@@ -500,8 +542,9 @@ enum CropService {
         if format.isLossy {
             properties[kCGImageDestinationLossyCompressionQuality] = quality
         }
-        // 携带原 EXIF / IPTC;GPS 按隐私开关决定是否带出
-        if let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+        // 携带原 EXIF / IPTC;隐私开关 stripMetadata 开启时全部剥离
+        if !stripMetadata,
+           let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
            let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
             for key in [kCGImagePropertyExifDictionary, kCGImagePropertyIPTCDictionary] {
                 if var value = props[key] as? [CFString: Any] {
@@ -518,5 +561,42 @@ enum CropService {
         CGImageDestinationAddImage(dest, finalOutput, properties as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw CropError.encodeFailed }
         return data as Data
+    }
+
+    /// 基于当前预览图快速估算导出体积(字节)。目标尺寸不大于预览图时先按目标尺寸缩略再编码，
+    /// 目标尺寸大于预览图时按像素面积幂律外推，兼顾速度与准确度。
+    static func estimateEncodedSize(preview: CGImage,
+                                    normalizedRect: CGRect,
+                                    targetPixelSize: CGSize,
+                                    format: CropFormat,
+                                    quality: Double) -> Int? {
+        let previewRect = CropMath.pixelRect(
+            normalized: normalizedRect,
+            pixelSize: CGSize(width: preview.width, height: preview.height)
+        )
+        guard let cropped = preview.cropping(to: previewRect) else { return nil }
+        let targetLongest = Int(max(targetPixelSize.width, targetPixelSize.height).rounded())
+        let sample = CropTransform.downscaled(cropped, longestSide: targetLongest)
+
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, format.uti as CFString, 1, nil) else {
+            return nil
+        }
+        var props: [CFString: Any] = [:]
+        if format.isLossy {
+            props[kCGImageDestinationLossyCompressionQuality] = quality
+        }
+        CGImageDestinationAddImage(dest, sample, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+
+        let sampleArea = Double(max(1, sample.width * sample.height))
+        let targetArea = Double(max(1, targetPixelSize.width * targetPixelSize.height))
+        if targetArea <= sampleArea * 1.02 {
+            return data.length
+        }
+        let ratio = targetArea / sampleArea
+        // 真实照片压缩后体积大致按面积的 ~0.85 次方增长（高频细节增多但相邻像素仍具相关性）
+        let estimated = Double(data.length) * pow(ratio, 0.85)
+        return max(data.length, Int(estimated.rounded()))
     }
 }

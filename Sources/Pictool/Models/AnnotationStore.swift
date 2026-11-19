@@ -12,6 +12,10 @@ final class AnnotationStore {
         sessions[Self.storageKey(for: url)] != nil
     }
 
+    /// 是否存在尚未导出/重置的编辑会话(用于退出应用前提醒)
+    var hasUnsavedSessions: Bool { !sessions.isEmpty }
+    var unsavedSessionCount: Int { sessions.count }
+
     func session(for url: URL) -> EditSession {
         sessions[Self.storageKey(for: url)] ?? EditSession()
     }

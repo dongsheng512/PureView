@@ -16,8 +16,22 @@ struct SettingsView: View {
     @State private var watermark = WatermarkSettings.load()
 
     var body: some View {
+        TabView {
+            appearanceTab
+                .tabItem { Label("外观", systemImage: "paintbrush") }
+            browsingTab
+                .tabItem { Label("浏览", systemImage: "photo.on.rectangle") }
+            watermarkTab
+                .tabItem { Label("水印", systemImage: "drop") }
+        }
+        .frame(width: 420)
+        .onAppear { CanvasBackground.normalizeStoredValue() }
+        .onChange(of: watermark) { _, value in value.save() }
+    }
+
+    private var appearanceTab: some View {
         Form {
-            Section("外观") {
+            Section {
                 Picker("画布背景", selection: $canvasBackground) {
                     ForEach(CanvasBackground.allCases) { option in
                         Text(option.label).tag(option)
@@ -31,53 +45,65 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
             }
-            Section("浏览") {
+        }
+        .formStyle(.grouped)
+        .frame(height: 220)
+    }
+
+    private var browsingTab: some View {
+        Form {
+            Section("显示与切换") {
                 Picker("打开时缩放", selection: $openZoomMode) {
                     ForEach(OpenZoomMode.allCases) { option in
                         Text(option.label).tag(option)
                     }
                 }
-                .pickerStyle(.radioGroup)
-                Toggle("到首尾后循环", isOn: $wrapNavigation)
+                .pickerStyle(.segmented)
                 Picker("切换效果", selection: $imageTransition) {
                     ForEach(ImageTransitionStyle.allCases) { option in
                         Text(option.label).tag(option)
                     }
                 }
-                .pickerStyle(.radioGroup)
-                Picker("排序", selection: $sortKey) {
+                .pickerStyle(.segmented)
+                Toggle("到首尾后循环", isOn: $wrapNavigation)
+            }
+            Section("列表与播放") {
+                Picker("排序依据", selection: $sortKey) {
                     ForEach(ImageSortKey.allCases) { option in
                         Text(option.label).tag(option)
                     }
                 }
-                .pickerStyle(.radioGroup)
-                Picker("顺序", selection: $sortDirection) {
+                .pickerStyle(.menu)
+                Picker("排序方向", selection: $sortDirection) {
                     ForEach(ImageSortDirection.allCases) { option in
                         Text(option.label).tag(option)
                     }
                 }
-                .pickerStyle(.radioGroup)
+                .pickerStyle(.segmented)
                 Picker("幻灯片间隔", selection: $slideshowInterval) {
                     ForEach(SlideShowInterval.allCases) { option in
                         Text(option.label).tag(option)
                     }
                 }
-                .pickerStyle(.radioGroup)
+                .pickerStyle(.menu)
             }
+        }
+        .formStyle(.grouped)
+        .frame(height: 310)
+    }
+
+    private var watermarkTab: some View {
+        Form {
             // R5:原标题「水印(标记导出时生效)」把语义说窄了 —— 这份设置同时也是编辑、
             // 拼版打印用的水印,而且在编辑态改动会回写保存。标题改为「默认」,关系写进脚注。
             Section {
                 WatermarkSettingsForm(settings: $watermark)
-            } header: {
-                Text("水印(编辑导出时的默认)")
             } footer: {
                 Text("进入编辑后,也可在顶栏的水印按钮里直接调整 —— 改动同样会保存为默认。")
             }
         }
         .formStyle(.grouped)
-        .frame(width: 380)
-        .onAppear { CanvasBackground.normalizeStoredValue() }
-        .onChange(of: watermark) { _, value in value.save() }
+        .frame(height: 330)
     }
 }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import MapKit
 
 /// 右侧信息面板:文件 / 图像 / 拍摄信息(EXIF) / GPS,支持一键复制
 struct InfoInspector: View {
@@ -8,6 +9,8 @@ struct InfoInspector: View {
     @State private var info: ImageInfo?
     /// 当前图的亮度/颜色分布。从 512px 的**降采样**位图算,不碰原图。
     @State private var histogram: Histogram?
+    /// 直方图展示模式:RGB 三通道叠加 / 感知亮度单通道
+    @State private var showLuminanceOnly = false
     // 窗口背景是透明的(.inspector 会透出去),面板自己铺当前画布背景色;AppStorage 保证设置里改背景时实时同步
     @AppStorage(CanvasBackground.storageKey) private var canvasBackground = CanvasBackground.defaultValue
 
@@ -72,6 +75,24 @@ struct InfoInspector: View {
                 Text("图片信息")
                     .font(.headline)
                 Spacer()
+                if let file {
+                    ShareLink(item: file.url) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.callout)
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                    .help("共享图片（隔空投送等）")
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([file.url])
+                    } label: {
+                        Image(systemName: "folder")
+                            .font(.callout)
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                    .help("在 Finder 中显示")
+                }
                 Button {
                     copyInfo()
                 } label: {
@@ -102,11 +123,34 @@ struct InfoInspector: View {
     private var histogramCard: some View {
         if let histogram, !histogram.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                Text("直方图")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                HistogramChart(histogram: histogram)
+                HStack {
+                    Text("直方图")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showLuminanceOnly.toggle()
+                        }
+                    } label: {
+                        Text(showLuminanceOnly ? "亮度" : "RGB")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.primary.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("切换 RGB / 亮度直方图")
+                }
+                HistogramChart(histogram: histogram, luminanceOnly: showLuminanceOnly)
                     .frame(height: 76)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showLuminanceOnly.toggle()
+                        }
+                    }
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -120,9 +164,23 @@ struct InfoInspector: View {
 
     private func sectionView(_ section: InfoSection) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(section.title)
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text(section.title)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if section.title == "GPS", let mapURL = info?.coordinate?.appleMapsURL {
+                    Button {
+                        NSWorkspace.shared.open(mapURL)
+                    } label: {
+                        Label("地图", systemImage: "map")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("在“地图”应用中查看拍摄位置")
+                }
+            }
             ForEach(section.rows) { row in
                 HStack(alignment: .top, spacing: 8) {
                     Text(row.label)
@@ -133,6 +191,10 @@ struct InfoInspector: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .font(.caption)
+            }
+            if section.title == "GPS", let coord = info?.coordinate {
+                LocationMiniMap(coordinate: coord)
+                    .padding(.top, 4)
             }
         }
         .padding(10)
@@ -157,9 +219,13 @@ struct InfoInspector: View {
 private struct HistogramChart: View {
 
     let histogram: Histogram
+    var luminanceOnly: Bool = false
 
     private var channels: [(counts: [Int], color: Color)] {
-        [(histogram.red, .red), (histogram.green, .green), (histogram.blue, .blue)]
+        if luminanceOnly, histogram.luminance.count == Histogram.binCount {
+            return [(histogram.luminance, .white)]
+        }
+        return [(histogram.red, .red), (histogram.green, .green), (histogram.blue, .blue)]
     }
 
     var body: some View {
@@ -183,5 +249,42 @@ private struct HistogramChart: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
         .accessibilityLabel("直方图")
+    }
+}
+
+/// GPS 内嵌小地图(原生 MapKit):静态只读不抢滚动条,点击直接唤起系统「地图」定位。
+private struct LocationMiniMap: View {
+    let coordinate: ImageCoordinate
+
+    private var clCoordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: coordinate.latitude, longitude: coordinate.longitude)
+    }
+
+    private var region: MKCoordinateRegion {
+        MKCoordinateRegion(
+            center: clCoordinate,
+            span: MKCoordinateSpan(latitudeDelta: 0.012, longitudeDelta: 0.012)
+        )
+    }
+
+    var body: some View {
+        Map(position: .constant(.region(region)), interactionModes: []) {
+            Marker("", coordinate: clCoordinate)
+        }
+        .mapStyle(.standard(elevation: .flat))
+        .frame(height: 136)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(.quaternary)
+        )
+        .id("\(coordinate.latitude),\(coordinate.longitude)")
+        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .onTapGesture {
+            if let url = coordinate.appleMapsURL {
+                NSWorkspace.shared.open(url)
+            }
+        }
+        .help("点击在“地图”应用中查看拍摄位置")
     }
 }

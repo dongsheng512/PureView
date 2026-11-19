@@ -35,8 +35,7 @@ struct PureHeader: View {
             leftCluster
                 .frame(minWidth: editingLeftReserve, alignment: .leading)
             if let editingToolbar {
-                // 必须是可伸缩容器:只有拿到父级给的确定宽度,内部 ViewThatFits 才能
-                // 在窄窗口下选到紧凑变体。fixedSize 会让它永远自认放得下,然后被裁掉。
+                // 必须是可伸缩容器:只有拿到父级给的确定宽度,内部布局才能自适应。
                 // 也不能在它后面再挂 Spacer —— 两者会瓜分剩余宽度,导出就推不到最右。
                 editingToolbar
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -44,7 +43,9 @@ struct PureHeader: View {
                     // 垂直方向留出悬停气泡,否则「导出」的提示会被裁掉。
                     .clipShape(HeaderToolbarClip())
             } else {
-                Spacer()
+                Spacer(minLength: 8)
+                browseCenterTools
+                Spacer(minLength: 8)
             }
             rightCluster
         }
@@ -111,62 +112,93 @@ struct PureHeader: View {
                 NativeTrafficLights()
                     .frame(width: NativeTrafficLights.width, height: NativeTrafficLights.height)
             }
-            // 灯组与侧栏按钮分开,不要和三盏灯挤成一排。
+            // 灯组与左簇(标题 + 侧栏按钮)分开,不要和三盏灯挤成一排。
             // 数值跟随灯槽宽(见 `NativeTrafficLights.trailingGap`):槽加宽多少、这里就收窄多少,
-            // 左簇(侧栏按钮 + 标题)位置不变。全屏时红绿灯交还系统,不留空隙。
-            HeaderButton("sidebar.leading", help: "显示/隐藏侧栏 (⌃⌘S)") {
-                store.toggleSidebar()
-            }
-            .padding(.leading, isFullScreen ? 0 : NativeTrafficLights.trailingGap)
+            // 左簇位置不变。全屏时红绿灯交还系统,不留空隙。
             Text("PureView")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
-                .padding(.leading, 10)
+                .padding(.leading, isFullScreen ? 0 : NativeTrafficLights.trailingGap)
+            HStack(spacing: 2) {
+                HeaderButton(
+                    "sidebar.leading",
+                    help: store.sidebarVisible ? "隐藏侧栏 (⌃⌘S)" : "显示侧栏 (⌃⌘S)",
+                    muted: !store.sidebarVisible
+                ) {
+                    store.toggleSidebar()
+                }
+                if !store.isEditing {
+                    HeaderButton("folder.badge.plus", help: "打开图片文件夹 (⌘O)") {
+                        store.openFolderPanel()
+                    }
+                }
+            }
+            .padding(.leading, 8)
         }
+    }
+
+    /// 浏览态居中双轻胶囊(与编辑态顶栏同一视觉语言)：
+    /// 左胶囊 = 翻页与缩放，右胶囊 = 旋转 / 编辑 / 幻灯片。
+    private var browseCenterTools: some View {
+        let slideshowPlaying = store.isSlideshowActive && !store.isSlideshowPaused
+        return HStack(spacing: 8) {
+            HStack(spacing: 2) {
+                HeaderButton("chevron.left", help: "上一张 (←)",
+                             disabled: !store.canStep(-1)) { store.step(-1) }
+                HeaderButton("chevron.right", help: "下一张 (→)",
+                             disabled: !store.canStep(1)) { store.step(1) }
+                Divider().frame(height: 12).padding(.horizontal, 3)
+                HeaderButton("minus.magnifyingglass", help: "缩小 (⌘-)",
+                             disabled: store.currentImage == nil) { store.requestZoom(.zoomOut) }
+                HeaderButton("plus.magnifyingglass", help: "放大 (⌘=)",
+                             disabled: store.currentImage == nil) { store.requestZoom(.zoomIn) }
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(0.045))
+            }
+
+            HStack(spacing: 2) {
+                HeaderButton("rotate.right", help: "顺时针旋转 90°",
+                             disabled: store.currentImage == nil) { store.requestRotate() }
+                HeaderButton("pencil.tip.crop.circle",
+                             help: "编辑图片",
+                             disabled: store.currentImage == nil) { store.toggleEditing() }
+                HeaderButton(
+                    slideshowPlaying ? "pause.circle.fill" : "play.circle",
+                    help: slideshowPlaying ? "暂停幻灯片 (空格)" : "幻灯片播放 (空格)",
+                    disabled: store.currentImage == nil || store.visibleImages.count < 2,
+                    emphasized: slideshowPlaying
+                ) { store.toggleSlideshow() }
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(0.045))
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var rightCluster: some View {
         HStack(spacing: 5) {
             if store.isEditing {
-                // 翻页和导出在编辑工具条里组成「‹ › | 导出」。这里只留安静的退出图标,
-                // 贴在导出右侧;玻璃只在悬停时出现,避免和导出抢主按钮。
+                // 编辑态最右只留安静的退出图标，贴在导出右侧。
                 HeaderButton("xmark",
                              help: "退出编辑 (Esc)",
                              disabled: store.currentImage == nil,
                              tooltipAlignsTrailing: true) { store.toggleEditing() }
             } else {
-                HeaderButton("folder.badge.plus", help: "打开图片文件夹 (⌘O)") {
-                    store.openFolderPanel()
-                }
-                HeaderDivider()
-                HeaderButton("chevron.left", help: "上一张 (←)",
-                             disabled: !store.canStep(-1)) { store.step(-1) }
-                HeaderButton("chevron.right", help: "下一张 (→)",
-                             disabled: !store.canStep(1)) { store.step(1) }
-                HeaderDivider()
-                HeaderButton("minus.magnifyingglass", help: "缩小 (⌘-)",
-                             disabled: store.currentImage == nil) { store.requestZoom(.zoomOut) }
-                HeaderButton("plus.magnifyingglass", help: "放大 (⌘=)",
-                             disabled: store.currentImage == nil) { store.requestZoom(.zoomIn) }
-                HeaderDivider()
-                HeaderButton("rotate.right", help: "顺时针旋转 90°",
-                             disabled: store.currentImage == nil) { store.requestRotate() }
-                HeaderButton("info.circle", help: "图片信息 (I)") {
+                HeaderButton(store.showInspector ? "info.circle.fill" : "info.circle",
+                             help: "图片信息 (I)",
+                             emphasized: store.showInspector) {
                     store.showInspector.toggle()
                 }
-                HeaderButton(
-                    store.isSlideshowActive && !store.isSlideshowPaused ? "pause.circle" : "play.circle",
-                    help: store.isSlideshowActive && !store.isSlideshowPaused
-                        ? "暂停幻灯片 (空格)"
-                        : "幻灯片播放 (空格)",
-                    disabled: store.currentImage == nil || store.visibleImages.count < 2
-                ) { store.toggleSlideshow() }
-                HeaderButton("printer", help: "打印 (⌘P)",
-                             disabled: store.currentImage == nil) { store.requestPrint() }
-                HeaderButton("square.and.pencil",
-                             help: "编辑图片",
-                             disabled: store.currentImage == nil) { store.toggleEditing() }
+                browseMoreMenu
                 HeaderDivider()
                 HeaderButton(
                     store.isImmersive ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
@@ -176,6 +208,47 @@ struct PureHeader: View {
                 ) { store.toggleImmersive() }
             }
         }
+    }
+
+    /// 浏览态低频动作收纳菜单(打印 / 复制 / 在访达中显示 / 共享)，避免顶栏按钮过密。
+    private var browseMoreMenu: some View {
+        Menu {
+            Button {
+                store.requestPrint()
+            } label: {
+                Label("打印…", systemImage: "printer")
+            }
+            .disabled(store.currentImage == nil)
+            if let current = store.currentImage {
+                Button {
+                    store.copyImageToPasteboard(current.id)
+                } label: {
+                    Label("复制图片", systemImage: "doc.on.doc")
+                }
+                Button {
+                    store.revealCurrentInFinder()
+                } label: {
+                    Label("在访达中显示", systemImage: "folder")
+                }
+                Divider()
+                ShareLink(item: current.url) {
+                    Label("共享…", systemImage: "square.and.arrow.up")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 12))
+                .foregroundStyle(store.currentImage == nil ? .secondary : .primary)
+                .frame(width: 24, height: 20)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(store.currentImage == nil)
+        .help("更多操作（打印、复制、共享）")
+        .accessibilityLabel("更多操作")
     }
 }
 
@@ -191,18 +264,22 @@ struct HeaderButton: View {
     let help: String
     var disabled = false
     var emphasized = false
+    var muted = false
     var tooltipAlignsTrailing = false
     let action: () -> Void
 
     @State private var hovering = false
+    @State private var showTooltip = false
+    @State private var tooltipTask: Task<Void, Never>?
 
     init(_ systemImage: String, help: String, disabled: Bool = false,
-         emphasized: Bool = false, tooltipAlignsTrailing: Bool = false,
+         emphasized: Bool = false, muted: Bool = false, tooltipAlignsTrailing: Bool = false,
          action: @escaping () -> Void) {
         self.systemImage = systemImage
         self.help = help
         self.disabled = disabled
         self.emphasized = emphasized
+        self.muted = muted
         self.tooltipAlignsTrailing = tooltipAlignsTrailing
         self.action = action
     }
@@ -211,6 +288,7 @@ struct HeaderButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 12, weight: emphasized ? .semibold : .regular))
+                .foregroundStyle(emphasized ? Color.accentColor : (muted ? Color.secondary : Color.primary))
                 .frame(width: 24, height: 20)
                 .background {
                     // 选中态只用填充表达(macOS 工具栏范式):阴影语义是"抬升",和"按下"矛盾。
@@ -229,11 +307,30 @@ struct HeaderButton: View {
         .disabled(disabled)
         .accessibilityLabel(help)
         .opacity(disabled ? 0.35 : 1)
-        .onHover { hovering = $0 }
+        .onHover { inside in
+            hovering = inside
+            tooltipTask?.cancel()
+            tooltipTask = nil
+            if inside, !disabled {
+                // 260ms 悬停延迟:避免鼠标横向划过顶栏 11 颗按钮时气泡连续闪烁。
+                tooltipTask = Task {
+                    try? await Task.sleep(for: .milliseconds(260))
+                    guard !Task.isCancelled else { return }
+                    showTooltip = true
+                }
+            } else {
+                showTooltip = false
+            }
+        }
+        .onDisappear {
+            tooltipTask?.cancel()
+            tooltipTask = nil
+            showTooltip = false
+        }
         .overlay(alignment: tooltipAlignsTrailing ? .topTrailing : .top) {
-            // 自绘 tooltip:系统 .help() 有 ~1.5s 延迟,这里 hover 立即显示。
+            // 自绘 tooltip:比系统 .help() (~1.5s) 响应更快,又带 260ms 防闪烁延迟。
             // 挂在按钮上方偏移 —— 顶栏贴窗口顶,标签要往**下方**弹才可见。
-            if hovering, !disabled {
+            if showTooltip, !disabled {
                 Text(help)
                     .font(.system(size: 11))
                     .foregroundStyle(Color.primary)
@@ -253,7 +350,7 @@ struct HeaderButton: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(.easeInOut(duration: 0.12), value: hovering)
+        .animation(.easeInOut(duration: 0.12), value: showTooltip)
     }
 }
 

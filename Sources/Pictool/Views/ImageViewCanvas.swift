@@ -8,7 +8,9 @@ import ImageIO
 struct ImageViewCanvas: NSViewRepresentable {
 
     let file: ImageFile?
-    /// 跟手翻页会在 SwiftUI 刷新前先写回刚翻到的邻图,避免下一滑还用旧的左右邻居。
+    /// 当前可见图片序列,供原生 NSPageController 建立分页条。
+    var files: [ImageFile] = []
+    /// 当前图前后邻居,供预解码使用。
     var neighbors: ImageNeighbors
     /// 画布背景(来自偏好设置),切图与切换偏好时实时生效
     let background: CanvasBackground
@@ -20,27 +22,32 @@ struct ImageViewCanvas: NSViewRepresentable {
     /// 当前图累计旋转次数(每格 90°)。画布按「次数 - 已应用」补差值,
     /// 新建的画布实例(纯净模式切换)能重放完整角度。
     let rotationCount: Int
-    /// 切图方向信号:+1 下一张(新图从右滑入),-1 上一张(从左滑入),0 无方向(淡入)
+    /// 切图方向信号:+1 下一张,-1 上一张,0 无方向
     let stepDirection: Int
     var onLoadingChange: (Bool) -> Void
     var onScaleChange: (CGFloat) -> Void
     var onImageInfo: (DisplayImageInfo) -> Void
     /// 当前显示位图是否已被用户旋转。旋转是纯显示态,切图即丢,需要让界面如实告知。
     var onRotationChange: (Bool) -> Void
+    var onSelect: (ImageFile.ID) -> Void = { _ in }
     var onStep: (Int) -> ImageNeighbors
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        context.coordinator.scrollView
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.containerView
     }
 
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.teardown()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
-        coordinator.resolvePagingCommit(file?.url)
-        coordinator.applyFile(file)
         coordinator.applyBackground(background)
+        coordinator.syncPageController(files: files, currentFile: file)
+        coordinator.applyFile(file)
         if let request = zoomRequest, request.token != coordinator.appliedZoomToken {
             coordinator.appliedZoomToken = request.token
             coordinator.performZoom(request.action)
@@ -58,28 +65,33 @@ struct ImageViewCanvas: NSViewRepresentable {
             coordinator.appliedRotationCount += applied
         } else if pendingRotations < 0 {
             coordinator.appliedRotationCount = rotationCount
+            if rotationCount == 0, coordinator.isRotatedBitmap {
+                coordinator.resetRotation()
+            }
         }
     }
 
     // MARK: - Coordinator
 
     @MainActor
-    final class Coordinator {
+    final class Coordinator: NSObject, NSPageControllerDelegate {
 
         var parent: ImageViewCanvas
+        let containerView = CanvasContainerView()
+        let pageController = NSPageController()
         let scrollView = CanvasScrollView()
         let clipView = CanvasClipView()
         let imageView = CanvasImageView()
 
-        private(set) var currentURL: URL?
-        private var loadTask: Task<Void, Never>?
-        private var animationTask: Task<Void, Never>?
+        var currentURL: URL?
+        var loadTask: Task<Void, Never>?
+        var animationTask: Task<Void, Never>?
         var appliedZoomToken = 0
         var appliedRotationCount = 0
-        private let zoomDebug = ProcessInfo.processInfo.arguments.contains("--zoom-debug")
+        let zoomDebug = ProcessInfo.processInfo.arguments.contains("--zoom-debug")
 
         /// --zoom-debug 时同步落一份到固定文件,便于从 Finder 启动的实例抓日志
-        private static let debugLogFile: FileHandle? = {
+        static let debugLogFile: FileHandle? = {
             guard ProcessInfo.processInfo.arguments.contains("--zoom-debug") else { return nil }
             let path = "/tmp/pictool_zoom.log"
             if !FileManager.default.fileExists(atPath: path) {
@@ -88,7 +100,7 @@ struct ImageViewCanvas: NSViewRepresentable {
             return FileHandle(forWritingAtPath: path)
         }()
 
-        private func debugLog(_ tag: String) {
+        func debugLog(_ tag: String) {
             guard zoomDebug else { return }
             let b = clipView.bounds
             let line = "[zoom] \(tag) scale=\(scale) fitScale=\(fitScale) wasFit=\(wasFit) origin=(\(b.origin.x), \(b.origin.y)) frame=\(imageView.frame) clip=(\(b.width), \(b.height)) mag=\(scrollView.magnification)"
@@ -100,46 +112,50 @@ struct ImageViewCanvas: NSViewRepresentable {
         }
 
         /// 延迟复查:捕获"事后被改回"的延迟性回退
-        private func lateCheck(_ tag: String, after: TimeInterval = 0.6) {
+        func lateCheck(_ tag: String, after: TimeInterval = 0.6) {
             DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in
                 self?.debugLog("LATE[\(tag)]")
             }
         }
 
-        private var scale: CGFloat = 1          // 点 / 图像点(以当前 NSImage.size 为准)
-        private var fitScale: CGFloat = 1
-        private var wasFit = true
-        private var isFullResolution = false
+        var scale: CGFloat = 1          // 点 / 图像点(以当前 NSImage.size 为准)
+        var fitScale: CGFloat = 1
+        var wasFit = true
+        var isFullResolution = false
         /// 解码完成但缩放动画未结束的换图操作,动画收尾时执行
-        private var pendingEscalateApply: (() -> Void)?
+        var pendingEscalateApply: (() -> Void)?
         /// 当前图的帧数;动图不参与全尺寸升级(没有更高分辨率,升级只会打断播放)
-        private var frameCount = 1
-        private var escalating = false
-        private var truePixelSize = CGSize.zero
+        var frameCount = 1
+        var escalating = false
+        var truePixelSize = CGSize.zero
         /// 当前 imageView 位图的真实像素(旋转后宽高对调;动图帧始终等于 truePixelSize)。
         /// 缩放读数与升级解码判定的统一几何基准。
-        private var bitmapPixelSize = CGSize.zero
+        var bitmapPixelSize = CGSize.zero
         /// 位图已被用户旋转过(此时不再从降采样缓存升级,避免旋转被覆盖)
-        private var isRotatedBitmap = false
-        private var mutatingCanvas = false
-        private var lastNotifiedPercent = Int.min
-        /// 交叠滑移的覆盖层。真正的图片视图在这段时间里藏起来,避免和动画图层叠成残影。
-        private var handoffOverlay: NSView?
-        /// 跟手翻页。松手动画期间仍占着这块,避免同一时间再开一段。
-        /// 松手时立刻改选中,弹簧只负责把画面送到位。若等弹簧停了再翻页,
-        /// 下一次滑动还顶在旧图的尽头上,看起来就像卡住,缩略图高亮也会晚一拍。
-        private var paging = Paging()
-        /// 跟手已经把邻图拉到位时,新图落地不再播一次短滑入。
-        private var skipNextEntry = false
-        /// onStep 之后若选中图没变,下一帧把翻页层收掉。
-        private var pagingPendingCommit = false
-        /// 递增使过期的过渡收尾不再摘掉新快照。
-        private var handoffGeneration = 0
-        private var lastHandoffStart = TimeInterval(0)
-        private var lastHandoffDuration = TimeInterval(0)
+        var isRotatedBitmap = false
+        var mutatingCanvas = false
+        var lastNotifiedPercent = Int.min
+        /// 原生 NSPageController 当前绑定的图片 URL 列表
+        var arrangedURLs: [URL] = []
+        /// 是否正处于 NSPageController 实时双指过渡或程序动画中
+        var isLivePaging = false
+        /// 程序触发 NSPageController 动画代数(防连按旧回调提前显示 scrollView)
+        var pageAnimationGeneration = 0
+        var lastFileSwitchTime: TimeInterval = 0
         /// deinit 是 nonisolated 的,Swift 6 不允许它访问非 Sendable 的实例状态。
         /// `DispatchWorkItem.cancel()` 本身线程安全,这里显式标注豁免即可。
-        nonisolated(unsafe) private var escalateWork: DispatchWorkItem?
+        nonisolated(unsafe) var escalateWork: DispatchWorkItem?
+
+        // 平滑缩放状态(由 ImageViewCanvas+Zoom.swift 驱动)
+        var zoomLink: CADisplayLink?
+        var zoomTarget: CGFloat?
+        var zoomStart: CGFloat = 1
+        var zoomStartTime: CFTimeInterval = 0
+        var zoomDuration: CFTimeInterval = 0.22
+        var zoomAnchorPoint: CGPoint = .zero
+        var zoomCompletesAsFit = false
+        /// 上次用来解释「实际大小」的屏幕倍率。换屏时用它把百分比换算到新屏。
+        var lastBacking: CGFloat = 0
 
         deinit {
             loadTask?.cancel()
@@ -148,10 +164,37 @@ struct ImageViewCanvas: NSViewRepresentable {
             escalateWork?.cancel()
         }
 
+        /// 视图卸载时主动回收动画、DisplayLink 与挂起任务，避免依赖 deinit 时机。
+        func teardown() {
+            loadTask?.cancel()
+            loadTask = nil
+            stopAnimation()
+            cancelSmoothZoom()
+            escalateWork?.cancel()
+            escalateWork = nil
+        }
+
         init(_ parent: ImageViewCanvas) {
             self.parent = parent
+            super.init()
+
+            // 容器视图严格裁剪边界,杜绝任何过渡图层溢出到左侧边栏
+            containerView.clipsToBounds = true
+            containerView.canvasBackground = parent.background
+
+            // 原生 AppKit NSPageController:负责双指触控板跟手翻页、惯性、橡皮筋与水平条过渡
+            let pageHost = NSView(frame: containerView.bounds)
+            pageHost.autoresizingMask = [.width, .height]
+            pageHost.clipsToBounds = true
+            pageController.view = pageHost
+            pageController.delegate = self
+            pageController.transitionStyle = .horizontalStrip
+            containerView.addSubview(pageHost)
 
             // 滚动条保持开启(放大后滚轮/触控板平移仍走 clip view),条子本身画成 0 宽以免 fit 取整误出条。
+            scrollView.frame = containerView.bounds
+            scrollView.autoresizingMask = [.width, .height]
+            scrollView.clipsToBounds = true
             scrollView.verticalScroller = HiddenScroller(frame: .zero)
             scrollView.horizontalScroller = HiddenScroller(frame: .zero)
             scrollView.hasVerticalScroller = true
@@ -170,6 +213,7 @@ struct ImageViewCanvas: NSViewRepresentable {
             clipView.canvasBackground = parent.background
             clipView.documentView = imageView
             scrollView.contentView = clipView
+            containerView.addSubview(scrollView)
 
             imageView.imageScaling = .scaleNone
 
@@ -177,9 +221,6 @@ struct ImageViewCanvas: NSViewRepresentable {
                 self?.smoothZoom(multiplyingBy: 1 + delta, anchor: anchor, duration: 0.18)
             }
             scrollView.onMagnifyDelta = { [weak self] delta, _ in
-                // 捏合以视口中心为锚点:macOS magnify 事件的位置是闲置的鼠标指针
-                // 而不是手指,围绕它放大会让画面随指针停放位置越放越偏。
-                // 「指哪放大哪」的需求由 ⌘/⌥+滚轮承担(仍以光标为锚点)。
                 guard let self else { return }
                 self.smoothZoom(multiplyingBy: 1 + delta, anchor: self.visibleCenter(), duration: 0.08)
             }
@@ -193,8 +234,8 @@ struct ImageViewCanvas: NSViewRepresentable {
             clipView.onHorizontalSwipe = { [weak self] step in
                 self?.stepFromControl(step)
             }
-            clipView.onHorizontalPan = { [weak self] dx, phase, time in
-                self?.handleTrackpadPan(deltaX: dx, phase: phase, timestamp: time) ?? false
+            clipView.onNativeScrollWheel = { [weak self] event in
+                self?.handleNativeScrollWheel(event) ?? false
             }
             clipView.onLayoutChange = { [weak self] in
                 self?.handleLayout()
@@ -216,9 +257,6 @@ struct ImageViewCanvas: NSViewRepresentable {
             imageView.onSwipe = { [weak self] delta in
                 self?.stepFromControl(delta)
             }
-            imageView.onSwipePan = { [weak self] dx, ended in
-                self?.handleMousePan(deltaX: dx, ended: ended) ?? false
-            }
 
             setupSelfTestHooks()
         }
@@ -226,7 +264,7 @@ struct ImageViewCanvas: NSViewRepresentable {
         /// 捏合手势结束:立即把视觉缩放(magnification)兑换为真实重绘。
         /// 若长期保留 magnification≠1,布局处理、缩放下限、升级解码都会基于失真状态运算,
         /// 且双击适配等路径不会重置它导致显示尺寸错误。
-        private func finishLiveMagnification() {
+        func finishLiveMagnification() {
             guard imageView.image != nil else { return }
             debugLog("liveMagnify end m=\(scrollView.magnification)")
             if abs(scrollView.magnification - 1) > 0.0005 {
@@ -240,7 +278,7 @@ struct ImageViewCanvas: NSViewRepresentable {
         /// 兑换也必须全程中心锚定:先归一(视觉回到手势前取景),再绕同一中心放大内容。
         /// 若改用光标锚定会与系统语义错位,兑换瞬间产生方向性漂移。
         /// 只在无手势进行时调用(按钮/键盘/手势结束),手势进行中禁止。
-        private func absorbMagnification() {
+        func absorbMagnification() {
             guard imageView.image != nil else { return }
             let m = scrollView.magnification
             guard abs(m - 1) > 0.0005 else {
@@ -253,7 +291,7 @@ struct ImageViewCanvas: NSViewRepresentable {
         }
 
         /// 自测:模拟一次捏合结束(仅 Debug 构建编译)
-        private func setupSelfTestHooks() {
+        func setupSelfTestHooks() {
 #if DEBUG
             guard ProcessInfo.processInfo.arguments.contains("--zoom-test") else { return }
             NotificationCenter.default.addObserver(
@@ -325,12 +363,13 @@ struct ImageViewCanvas: NSViewRepresentable {
 
         /// 已应用的背景。updateNSView 每次 SwiftUI 重渲染都会跑,
         /// 不判等的话 clipView 的 didSet 会让画布每帧全量重绘(平滑缩放时尤其明显)。
-        private var appliedBackground: CanvasBackground?
+        var appliedBackground: CanvasBackground?
 
         /// 应用画布背景;图片层保持透明以便 PNG 透出背景
         func applyBackground(_ background: CanvasBackground) {
             guard appliedBackground != background else { return }
             appliedBackground = background
+            containerView.canvasBackground = background
             // 磨砂档:交出底色,让窗口背后那层玻璃透上来(与 init 里同一处约束)
             scrollView.drawsBackground = !background.isTranslucent
             scrollView.backgroundColor = background.color
@@ -344,33 +383,18 @@ struct ImageViewCanvas: NSViewRepresentable {
 
         func applyFile(_ file: ImageFile?) {
             let url = file?.url
-            guard url != currentURL else {
-                notePagingImageReady()
-                return
-            }
-            // 翻页自己提交的那张:真图换到下面,覆盖层继续演,不要再滑一次。
-            let keepOverlay = paging.active && url.map { incoming in
-                paging.pendingURLs.contains { sameFile($0, incoming) }
-            } ?? false
-            if paging.active, !keepOverlay {
-                // 网格点了另一张。这段翻页让路。
-                beginHandoff(restoreImage: true)
-            }
-            pagingPendingCommit = false
-            if keepOverlay, let url {
-                paging.pendingURLs.removeAll { sameFile($0, url) }
-            }
+            guard url != currentURL else { return }
             currentURL = url
             stopAnimation()
             cancelSmoothZoom()
             loadTask?.cancel()
+            loadTask = nil
             escalateWork?.cancel()
             escalating = false
             pendingEscalateApply = nil   // 换图后旧图的全尺寸换入作废
             scrollView.magnification = 1   // 切换图片时重置手势缩放
 
             guard let url else {
-                beginHandoff(restoreImage: true)
                 imageView.image = nil
                 parent.onLoadingChange(false)
                 parent.onImageInfo(DisplayImageInfo())
@@ -381,38 +405,37 @@ struct ImageViewCanvas: NSViewRepresentable {
 
             let maxPixel = displayMaxPixel()
             if let cached = ImageLoader.cachedDisplayImage(url: url, maxPixelSize: maxPixel) {
+                lastFileSwitchTime = CACurrentMediaTime()
                 parent.onLoadingChange(false)
-                let outgoing = keepOverlay ? nil : makeOutgoingSnapshot()
                 setDisplayImage(cached.image, facts: cached.facts, url: url)
-                if keepOverlay {
-                    notePagingImageReady()
-                } else {
-                    runEntryTransition(direction: parent.stepDirection, outgoing: outgoing)
+                if !isLivePaging, parent.transition == .fade, !Self.reduceMotion {
+                    runFadeTransition(direction: parent.stepDirection)
                 }
                 prefetchNeighbors(maxPixel: maxPixel)
                 return
             }
 
-            // 保留上一张直到新图就绪,避免切图闪白。连按方向键时短延迟合并,避免中间图全部开解。
+            // 保留上一张直到新图就绪,避免切图闪白。单次切图立刻开解;仅在连续快切(<120ms)时短防抖合并中间帧。
+            let now = CACurrentMediaTime()
+            let isRapidSwitch = (now - lastFileSwitchTime) < 0.12
+            lastFileSwitchTime = now
             parent.onLoadingChange(true)
             loadTask = Task { [weak self] in
                 guard let self else { return }
-                try? await Task.sleep(nanoseconds: 50_000_000)
+                if isRapidSwitch {
+                    try? await Task.sleep(nanoseconds: 35_000_000)
+                }
                 guard !Task.isCancelled, self.currentURL == url else { return }
                 let loaded = await ImageLoader.displayImage(url: url, maxPixelSize: maxPixel)
                 guard !Task.isCancelled, self.currentURL == url else { return }
+                self.loadTask = nil
                 self.parent.onLoadingChange(false)
                 if let loaded {
-                    let outgoing = keepOverlay ? nil : self.makeOutgoingSnapshot()
                     self.setDisplayImage(loaded.image, facts: loaded.facts, url: url)
-                    // 翻页还盖着,或者加载期间手指已经按上:只换下面的真图。
-                    if keepOverlay || self.paging.active {
-                        self.notePagingImageReady()
-                    } else {
-                        self.runEntryTransition(direction: self.parent.stepDirection, outgoing: outgoing)
+                    if !self.isLivePaging, self.parent.transition == .fade, !Self.reduceMotion {
+                        self.runFadeTransition(direction: self.parent.stepDirection)
                     }
-                } else if !self.paging.active {
-                    self.beginHandoff(restoreImage: true)
+                } else {
                     self.imageView.image = nil
                     self.parent.onImageInfo(DisplayImageInfo())
                 }
@@ -421,845 +444,10 @@ struct ImageViewCanvas: NSViewRepresentable {
         }
 
         /// 切图过渡。淡入只动新图;整页滑移先把当前位图留成快照,再和邻图一起滑走。
-        private func runEntryTransition(direction: Int, outgoing: OutgoingSnapshot?) {
-            // 跟手或松手弹簧还在。真图已经换到下面,覆盖层继续,不要摘。
-            // 方向键和点缩略图会先停掉翻页,不会带着 active 走进来。
-            if paging.active {
-                return
-            }
-            if skipNextEntry || Self.reduceMotion {
-                beginHandoff(restoreImage: true)
-                return
-            }
-            switch parent.transition {
-            case .fade:
-                beginHandoff(restoreImage: true)
-                runFadeTransition(direction: direction)
-            case .slide:
-                runSlideTransition(direction: direction, outgoing: outgoing)
-            }
-        }
-
-        /// 原先的单层效果:新图从透明淡入,左右切换时再滑 24pt。
-        private func runFadeTransition(direction: Int) {
-            guard let layer = imageView.layer, imageView.image != nil else { return }
-            layer.removeAnimation(forKey: "entrySlide")
-            layer.removeAnimation(forKey: "entryFade")
-            layer.opacity = 1
-            CATransaction.begin()
-            CATransaction.setDisableActions(false)
-            if direction != 0 {
-                let slide = CABasicAnimation(keyPath: "position.x")
-                slide.fromValue = layer.position.x + CGFloat(direction) * 24
-                slide.toValue = layer.position.x
-                slide.duration = 0.25
-                slide.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                layer.add(slide, forKey: "entrySlide")
-
-                let fade = CABasicAnimation(keyPath: "opacity")
-                fade.fromValue = 0.0
-                fade.toValue = 1.0
-                fade.duration = 0.22
-                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                layer.add(fade, forKey: "entryFade")
-            } else {
-                let fade = CABasicAnimation(keyPath: "opacity")
-                fade.fromValue = 0.0
-                fade.toValue = 1.0
-                fade.duration = 0.18
-                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                layer.add(fade, forKey: "entryFade")
-            }
-            CATransaction.commit()
-        }
-
-        /// 相册式整页滑移。有方向:旧图和新图一起走,下一张从右边进来,上一张从左边进来,中间留一条缝。
-        /// 无方向(点缩略图、打开文件夹):只交叉淡化。连按快过上一段时缩短。
-        /// 动画放在覆盖层自己的子图层上。图片视图的根图层一旦被平移,不透明画布
-        /// 中间几帧不会补画,滑动过程就会拖出残影。
-        private func runSlideTransition(direction: Int, outgoing: OutgoingSnapshot?) {
-            guard let contents = imageView.layer?.contents, imageView.image != nil else {
-                beginHandoff(restoreImage: true)
-                return
-            }
-            let generation = beginHandoff(restoreImage: false)
-            let duration = nextHandoffDuration(direction: direction)
-            guard let overlay = makeHandoffOverlay() else {
-                restoreImageViewPresentation()
-                return
-            }
-            let scale = imageView.layer?.contentsScale ?? (scrollView.window?.backingScaleFactor ?? 2)
-            let newRect = viewportRect(forImageFrame: imageView.frame, boundsOrigin: clipView.bounds.origin)
-            let newLayer = pictureLayer(contents: contents, scale: scale, rect: newRect)
-
-            var oldLayer: CALayer?
-            if let outgoing {
-                let oldRect = viewportRect(forImageFrame: outgoing.frame, boundsOrigin: outgoing.boundsOrigin)
-                oldLayer = pictureLayer(contents: outgoing.contents, scale: outgoing.contentsScale, rect: oldRect)
-            }
-
-            CATransaction.begin()
-            CATransaction.setCompletionBlock { [weak self] in
-                Task { @MainActor in
-                    self?.finishHandoff(generation)
-                }
-            }
-            CATransaction.setDisableActions(true)
-            imageView.alphaValue = 0
-            imageView.layer?.opacity = 0
-            imageView.layer?.transform = CATransform3DIdentity
-            if let oldLayer {
-                overlay.hostLayer.addSublayer(oldLayer)
-            }
-            overlay.hostLayer.addSublayer(newLayer)
-            CATransaction.setDisableActions(false)
-            let timing = CAMediaTimingFunction(name: .easeOut)
-            if direction != 0 {
-                let width = clipView.bounds.width
-                let incoming = ImageHandoff.pageOffset(direction: direction, viewportWidth: width)
-                let outgoingShift = ImageHandoff.commitTranslation(direction: direction, viewportWidth: width)
-                addSlide(on: newLayer, from: newLayer.position.x + incoming, to: newLayer.position.x, duration: duration, timing: timing)
-                if let oldLayer {
-                    addSlide(
-                        on: oldLayer,
-                        from: oldLayer.position.x,
-                        to: oldLayer.position.x + outgoingShift,
-                        duration: duration,
-                        timing: timing
-                    )
-                }
-            } else {
-                let fade = CABasicAnimation(keyPath: "opacity")
-                fade.fromValue = 0.0
-                fade.toValue = 1.0
-                fade.duration = duration
-                fade.timingFunction = timing
-                fade.fillMode = .backwards
-                newLayer.add(fade, forKey: "entryFade")
-                if let oldLayer {
-                    let fadeOut = CABasicAnimation(keyPath: "opacity")
-                    fadeOut.fromValue = 1.0
-                    fadeOut.toValue = 0.0
-                    fadeOut.duration = duration
-                    fadeOut.timingFunction = timing
-                    fadeOut.fillMode = .backwards
-                    oldLayer.add(fadeOut, forKey: "entryFade")
-                }
-            }
-            CATransaction.commit()
-        }
-
-        /// 显式位移动画。必须在关闭了隐式动作之后再挂上,否则这一段会被事务吃掉,画面直接跳到终点。
-        private func addSlide(on layer: CALayer, from: CGFloat, to: CGFloat, duration: TimeInterval, timing: CAMediaTimingFunction) {
-            let slide = CABasicAnimation(keyPath: "position.x")
-            slide.fromValue = from
-            slide.toValue = to
-            slide.duration = duration
-            slide.timingFunction = timing
-            slide.fillMode = .both
-            slide.isRemovedOnCompletion = false
-            layer.add(slide, forKey: "entrySlide")
-        }
-
-        /// 换图前抓住当前位图和它所在的文档位置。淡入模式不需要快照。
-        private func makeOutgoingSnapshot() -> OutgoingSnapshot? {
-            guard parent.transition == .slide,
-                  imageView.image != nil,
-                  let contents = imageView.layer?.contents,
-                  imageView.frame.width > 1, imageView.frame.height > 1 else { return nil }
-            let scale = imageView.layer?.contentsScale ?? (scrollView.window?.backingScaleFactor ?? 2)
-            return OutgoingSnapshot(
-                contents: contents,
-                contentsScale: scale,
-                frame: imageView.frame,
-                boundsOrigin: clipView.bounds.origin
-            )
-        }
-
-        /// 盖住当前视口的一层。子图层的移动由这层自己合成,不会写进画布的不透明缓存。
-        private func makeHandoffOverlay() -> HandoffOverlay? {
-            let viewport = clipView.bounds
-            guard viewport.width > 1, viewport.height > 1 else { return nil }
-            let overlay = HandoffOverlay(frame: viewport)
-            let host = overlay.hostLayer
-            host.backgroundColor = parent.background.isTranslucent ? nil : parent.background.color.cgColor
-            // 挂在视口上,而不是滚动画布的图片视图上。frame 用 bounds,刚好盖住可见区域。
-            clipView.addSubview(overlay, positioned: .above, relativeTo: imageView)
-            overlay.frame = viewport
-            host.frame = overlay.bounds
-            handoffOverlay = overlay
-            return overlay
-        }
-
-        private func pictureLayer(contents: Any, scale: CGFloat, rect: CGRect) -> CALayer {
-            let layer = CALayer()
-            layer.contents = contents
-            layer.contentsGravity = .resize
-            layer.contentsScale = scale
-            layer.minificationFilter = .trilinear
-            layer.magnificationFilter = .trilinear
-            layer.isOpaque = false
-            layer.backgroundColor = nil
-            layer.shadowOpacity = 0
-            // 边缘抗锯齿会拿透明去混,滑开的一侧留下一条深色残边。
-            layer.allowsEdgeAntialiasing = false
-            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            layer.bounds = CGRect(origin: .zero, size: rect.size)
-            layer.position = CGPoint(x: rect.midX, y: rect.midY)
-            layer.actions = [
-                "bounds": NSNull(),
-                "position": NSNull(),
-                "opacity": NSNull(),
-                "contents": NSNull(),
-                "transform": NSNull(),
-            ]
-            return layer
-        }
-
-        /// 文档坐标换成视口坐标(覆盖层的本地坐标)。
-        private func viewportRect(forImageFrame frame: CGRect, boundsOrigin: CGPoint) -> CGRect {
-            ImageHandoff.parkedFrame(
-                oldImageFrame: frame,
-                oldBoundsOrigin: boundsOrigin,
-                newBoundsOrigin: .zero
-            )
-        }
-
-        private func nextHandoffDuration(direction: Int) -> TimeInterval {
-            let now = CACurrentMediaTime()
-            let rapid = lastHandoffDuration > 0 && now - lastHandoffStart < lastHandoffDuration
-            let duration = ImageHandoff.duration(direction: direction, rapid: rapid)
-            lastHandoffStart = now
-            lastHandoffDuration = duration
-            return duration
-        }
-
-        /// 摘掉正在播的覆盖层,并使它的收尾回调失效。
-        @discardableResult
-        private func beginHandoff(restoreImage: Bool) -> Int {
-            handoffGeneration += 1
-            paging = Paging()
-            pagingPendingCommit = false
-            skipNextEntry = false
-            handoffOverlay?.removeFromSuperview()
-            handoffOverlay = nil
-            if restoreImage { restoreImageViewPresentation() }
-            return handoffGeneration
-        }
-
-        private func finishHandoff(_ generation: Int) {
-            guard handoffGeneration == generation else { return }
-            handoffOverlay?.removeFromSuperview()
-            handoffOverlay = nil
-            restoreImageViewPresentation()
-            clipView.needsDisplay = true
-        }
-
-        private func restoreImageViewPresentation() {
-            imageView.layer?.removeAnimation(forKey: "entrySlide")
-            imageView.layer?.removeAnimation(forKey: "entryFade")
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            imageView.alphaValue = 1
-            imageView.layer?.opacity = 1
-            imageView.layer?.transform = CATransform3DIdentity
-            CATransaction.commit()
-        }
-
-        /// 跟手翻页已经交出去、但这帧选中图没变:手势落空,把覆盖层收掉。
-        func resolvePagingCommit(_ url: URL?) {
-            guard pagingPendingCommit, !paging.active, url == currentURL else { return }
-            pagingPendingCommit = false
-            skipNextEntry = false
-            beginHandoff(restoreImage: true)
-        }
-
-        private static var reduceMotion: Bool {
-            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        }
-
-        /// 图片没有横向溢出时才跟手。放大后的横拖仍是平移。
-        private var canPageInteractively: Bool {
-            guard parent.transition == .slide, imageView.image != nil, !Self.reduceMotion else { return false }
-            return imageView.frame.width <= clipView.bounds.width + 0.5
-        }
-
-        func handleTrackpadPan(deltaX: CGFloat, phase: NSEvent.Phase, timestamp: TimeInterval) -> Bool {
-            let began = phase.contains(.began)
-            let ended = phase.contains(.ended)
-            let cancelled = phase.contains(.cancelled)
-            if paging.settling {
-                // 手指又按上或又拖了:停在当前这一帧。已经翻过去的那张改成当前图,才能接着滑。
-                if began || deltaX != 0 {
-                    interruptPaging()
-                } else {
-                    return true
-                }
-            }
-            guard canPageInteractively || paging.active else {
-                // 覆盖层还盖着、但这张图已经不能跟手:把真图露出来,避免画面停在旧的一帧上。
-                if handoffOverlay != nil { beginHandoff(restoreImage: true) }
-                return false
-            }
-            // deltaX 是手指位移:> 0 手指向右。整条画布跟着手走。
-            // 相位有时会叠着别的标记,不能用全等,否则这段事件会被漏掉。
-            if cancelled && !began && !phase.contains(.changed) {
-                if paging.active { endPaging(cancelled: true) }
-                return true
-            }
-            if ended && !began {
-                guard paging.active else { return false }
-                if deltaX != 0 { notePaging(delta: deltaX, time: timestamp) }
-                else if paging.lastTime > 0, timestamp - paging.lastTime > 0.08 {
-                    paging.velocity = 0
-                }
-                endPaging(cancelled: false)
-                return true
-            }
-            if !paging.active {
-                guard startPaging() else {
-                    if handoffOverlay != nil { beginHandoff(restoreImage: true) }
-                    return false
-                }
-            }
-            if deltaX != 0 { notePaging(delta: deltaX, time: timestamp) }
-            refreshPagingLayers()
-            return true
-        }
-
-        func handleMousePan(deltaX: CGFloat, ended: Bool) -> Bool {
-            if paging.settling {
-                if ended || deltaX == 0 { return true }
-                interruptPaging()
-            }
-            guard canPageInteractively || paging.active else { return false }
-            if ended {
-                guard paging.active else { return true }
-                endPaging(cancelled: false)
-                return true
-            }
-            if !paging.active {
-                guard startPaging() else { return false }
-            }
-            if deltaX != 0 { notePaging(delta: deltaX, time: CACurrentMediaTime()) }
-            refreshPagingLayers()
-            return true
-        }
-
-        private func startPaging() -> Bool {
-            guard canPageInteractively, let contents = imageView.layer?.contents else { return false }
-            handoffGeneration += 1
-            let generation = handoffGeneration
-            handoffOverlay?.removeFromSuperview()
-            handoffOverlay = nil
-            guard let overlay = makeHandoffOverlay() else { return false }
-            let scale = imageView.layer?.contentsScale ?? (scrollView.window?.backingScaleFactor ?? 2)
-            let rect = viewportRect(forImageFrame: imageView.frame, boundsOrigin: clipView.bounds.origin)
-            let current = pictureLayer(contents: contents, scale: scale, rect: rect)
-            // 三张图直接挂在覆盖层上,和方向键那次滑移同一条能画出来的路径。
-            // 中间再套一层画布时,位移加在那层上,屏幕上的图不动,拖起来就像卡住。
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            overlay.hostLayer.addSublayer(current)
-            imageView.alphaValue = 0
-            imageView.layer?.opacity = 0
-            CATransaction.commit()
-            skipNextEntry = false
-            pagingPendingCommit = false
-            paging = Paging(
-                active: true,
-                generation: generation,
-                currentLayer: current,
-                currentBase: current.position.x
-            )
-            paging.displayedURL = currentURL
-            // 左右两张先摆上。整段手势都留着,过零也不摘,滑的时候才像在拖一块已经排好的画布。
-            ensureNeighbor(direction: -1)
-            ensureNeighbor(direction: 1)
-            prefetchNeighbors(maxPixel: displayMaxPixel())
-            return true
-        }
-
-        private func notePaging(delta: CGFloat, time: TimeInterval) {
-            if paging.lastTime > 0 {
-                let dt = time - paging.lastTime
-                if dt > 0.001, dt < 0.05 {
-                    let sample = delta / CGFloat(dt)
-                    // 最近一次权重大,松手速度跟得上甩动,而不是慢半拍。
-                    paging.velocity = paging.velocity * 0.3 + sample * 0.7
-                } else if dt >= 0.05 {
-                    paging.velocity = 0
-                }
-            }
-            paging.lastTime = time
-            paging.rawTranslation += delta
-        }
-
-        /// 方向键、鼠标阈值横滑。正在跟手时先停掉,避免弹簧还在播又被摘层。
-        private func stepFromControl(_ direction: Int) {
-            if paging.active {
-                beginHandoff(restoreImage: true)
-            }
-            parent.neighbors = parent.onStep(direction)
-        }
-
-        private func sameFile(_ a: URL?, _ b: URL?) -> Bool {
-            switch (a, b) {
-            case (nil, nil):
-                return true
-            case let (lhs?, rhs?):
-                return lhs.standardizedFileURL == rhs.standardizedFileURL
-            default:
-                return false
-            }
-        }
-
-        /// 弹回或翻页的弹簧还没停时,手指又按上了:停在当前这一帧,改回跟手。
-        /// 已经提交的那张变成新的当前图,否则下一次滑动还顶在旧页面的尽头上。
-        private func interruptPaging() {
-            guard paging.active, paging.settling, paging.currentLayer != nil else { return }
-            let shift = currentVisualShift()
-            handoffGeneration += 1
-            paging.generation = handoffGeneration
-            let slots = paging.slots
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            for slot in slots {
-                slot.layer.removeAnimation(forKey: "paging")
-                slot.layer.position.x = slot.base + shift
-            }
-            CATransaction.commit()
-            paging.settling = false
-            paging.release = nil
-            paging.velocity = 0
-            paging.lastTime = 0
-            if paging.committedDirection != 0 {
-                rebaseCommittedPage(shift: shift)
-            } else {
-                paging.rawTranslation = shift
-                paging.presented = shift
-                paging.grabbedFromCommit = false
-            }
-        }
-
-        /// 松手时已经翻过去的那张,接住后就是当前图。位移改到以它为 0,画面不跳。
-        private func rebaseCommittedPage(shift: CGFloat) {
-            let direction = paging.committedDirection
-            guard direction != 0 else { return }
-            let width = clipView.bounds.width
-            let commitT = ImageHandoff.commitTranslation(direction: direction, viewportWidth: width)
-            let incoming = direction > 0 ? paging.nextLayer : paging.previousLayer
-            guard let incoming else {
-                // 邻图还没解码出来。先按旧画布跟手,松手只把这次翻页送完,不再连翻。
-                paging.needsRebuild = true
-                paging.rebaseDirection = direction
-                paging.rebuildCommit = commitT
-                paging.committedDirection = 0
-                paging.restingTranslation = commitT
-                paging.rawTranslation = shift
-                paging.presented = shift
-                paging.grabbedFromCommit = true
-                paging.grabTranslation = shift
-                return
-            }
-            paging.committedDirection = 0
-            applyRebase(shift: shift, commitTranslation: commitT, direction: direction, incoming: incoming)
-        }
-
-        private func tryRebasePending() {
-            guard paging.needsRebuild, !paging.settling, paging.rebaseDirection != 0 else { return }
-            let direction = paging.rebaseDirection
-            let incoming = direction > 0 ? paging.nextLayer : paging.previousLayer
-            guard let incoming else { return }
-            let shift = paging.presented
-            let commitT = paging.rebuildCommit
-            paging.needsRebuild = false
-            paging.rebaseDirection = 0
-            applyRebase(shift: shift, commitTranslation: commitT, direction: direction, incoming: incoming)
-        }
-
-        private func applyRebase(shift: CGFloat, commitTranslation: CGFloat, direction: Int, incoming: CALayer) {
-            let width = clipView.bounds.width
-            let newTranslation = ImageHandoff.translationAfterCommittedInterrupt(
-                shift: shift,
-                commitTranslation: commitTranslation
-            )
-            let oldCurrent = paging.currentLayer
-            let centerBase = paging.currentBase
-            let outgoing = direction > 0 ? paging.previousLayer : paging.nextLayer
-
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            outgoing?.removeFromSuperlayer()
-            if let oldCurrent, let host = (handoffOverlay as? HandoffOverlay)?.hostLayer, oldCurrent !== incoming {
-                host.insertSublayer(oldCurrent, below: incoming)
-            }
-            CATransaction.commit()
-
-            let sideBase = centerBase + ImageHandoff.pageOffset(direction: -direction, viewportWidth: width)
-            if direction > 0 {
-                paging.previousLayer = oldCurrent
-                paging.previousBase = sideBase
-                paging.previousURL = paging.originURL
-                paging.nextLayer = nil
-                paging.nextBase = 0
-                paging.nextURL = nil
-            } else {
-                paging.nextLayer = oldCurrent
-                paging.nextBase = sideBase
-                paging.nextURL = paging.originURL
-                paging.previousLayer = nil
-                paging.previousBase = 0
-                paging.previousURL = nil
-            }
-            paging.currentLayer = incoming
-            paging.currentBase = centerBase
-            paging.displayedURL = paging.committedURL ?? paging.displayedURL
-            paging.committedDirection = 0
-            paging.restingTranslation = 0
-            paging.needsRebuild = false
-            paging.rebaseDirection = 0
-            paging.rawTranslation = newTranslation
-            paging.presented = newTranslation
-            paging.velocity = 0
-            paging.grabbedFromCommit = true
-            paging.grabTranslation = newTranslation
-            applyPagingTranslation(newTranslation)
-            syncPagingNeighbors()
-        }
-
-        /// 画布已经以新图为当前张之后,按现在的邻居补上缺的一侧。弹簧还按旧三条在走时不能调用。
-        private func syncPagingNeighbors() {
-            guard paging.active, !paging.settling, paging.committedDirection == 0, !paging.needsRebuild,
-                  paging.currentLayer != nil else { return }
-            let previous = parent.neighbors.previous
-            let next = parent.neighbors.next
-            if !sameFile(paging.previousURL, previous) {
-                paging.previousLayer?.removeFromSuperlayer()
-                paging.previousLayer = nil
-                paging.previousURL = nil
-                paging.previousBase = 0
-            }
-            if !sameFile(paging.nextURL, next) {
-                paging.nextLayer?.removeFromSuperlayer()
-                paging.nextLayer = nil
-                paging.nextURL = nil
-                paging.nextBase = 0
-            }
-            if previous != nil { ensureNeighbor(direction: -1) }
-            if next != nil { ensureNeighbor(direction: 1) }
-        }
-
-        /// 选中已经落到新图、并且手指又按上了:把缺的邻图补上。弹簧没停、旧三条还在时不动。
-        private func notePagingImageReady() {
-            guard paging.active, !paging.settling, paging.committedDirection == 0 else { return }
-            if paging.needsRebuild {
-                tryRebasePending()
-            }
-            if !paging.needsRebuild {
-                syncPagingNeighbors()
-            }
-        }
-
-        private func currentVisualShift() -> CGFloat {
-            guard let current = paging.currentLayer else { return paging.presented }
-            let x = current.presentation()?.position.x ?? current.position.x
-            return x - paging.currentBase
-        }
-
-        private func refreshPagingLayers() {
-            let shown = ImageHandoff.presentedTranslation(
-                raw: paging.rawTranslation,
-                viewportWidth: clipView.bounds.width,
-                hasNext: parent.neighbors.next != nil,
-                hasPrevious: parent.neighbors.previous != nil
-            )
-            paging.presented = shown
-            applyPagingTranslation(shown)
-        }
-
-        /// 每张图从自己的基准位置平移同一段。正值往右,露出上一张。
-        private func applyPagingTranslation(_ translation: CGFloat) {
-            guard paging.currentLayer != nil else { return }
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            for slot in paging.slots {
-                slot.layer.position.x = slot.base + translation
-            }
-            CATransaction.commit()
-        }
-
-        /// 邻图固定摆在画布两侧。后解码完也只是补进这一格,不另做一段滑入。
-        private func ensureNeighbor(direction: Int) {
-            guard direction != 0, paging.currentLayer != nil,
-                  let url = parent.neighbors.url(direction: direction) else { return }
-            if direction > 0, paging.nextLayer != nil { return }
-            if direction < 0, paging.previousLayer != nil { return }
-            let maxPixel = displayMaxPixel()
-            if let cached = ImageLoader.cachedDisplayImage(url: url, maxPixelSize: maxPixel),
-               let cg = cached.image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                installNeighbor(cg: cg, imageSize: cached.image.size, direction: direction, url: url)
-                return
-            }
-            guard !paging.loadingDirections.contains(direction) else { return }
-            paging.loadingDirections.insert(direction)
-            Task { @MainActor [weak self] in
-                let loaded = await ImageLoader.displayImage(url: url, maxPixelSize: maxPixel)
-                guard let self else { return }
-                self.paging.loadingDirections.remove(direction)
-                guard self.paging.active else { return }
-                if direction > 0, self.paging.nextLayer != nil { return }
-                if direction < 0, self.paging.previousLayer != nil { return }
-                let wanted = self.parent.neighbors.url(direction: direction)
-                let fillingCommit = (self.paging.committedDirection == direction && self.sameFile(url, self.paging.committedURL))
-                    || (self.paging.needsRebuild && self.paging.rebaseDirection == direction && self.sameFile(url, self.paging.committedURL))
-                guard self.sameFile(wanted, url) || fillingCommit else {
-                    if wanted != nil { self.ensureNeighbor(direction: direction) }
-                    return
-                }
-                guard let loaded,
-                      let cg = loaded.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-                self.installNeighbor(cg: cg, imageSize: loaded.image.size, direction: direction, url: url)
-            }
-        }
-
-        private func installNeighbor(cg: CGImage, imageSize: CGSize, direction: Int, url: URL) {
-            guard paging.currentLayer != nil, let overlay = handoffOverlay as? HandoffOverlay else { return }
-            let viewport = overlay.bounds.size
-            guard viewport.width > 1, viewport.height > 1 else { return }
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            var rect = ImageHandoff.fittedRect(imageSize: imageSize, viewport: viewport, backing: backing)
-            rect.origin.x += ImageHandoff.pageOffset(direction: direction, viewportWidth: viewport.width)
-            let layer = pictureLayer(contents: cg, scale: backing, rect: rect)
-            let base = layer.position.x
-            let host = overlay.hostLayer
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            if let current = paging.currentLayer {
-                host.insertSublayer(layer, below: current)
-            } else {
-                host.addSublayer(layer)
-            }
-            if direction > 0 {
-                paging.nextLayer = layer
-                paging.nextBase = base
-                paging.nextURL = url
-            } else {
-                paging.previousLayer = layer
-                paging.previousBase = base
-                paging.previousURL = url
-            }
-            if paging.settling {
-                layer.position.x = base + paging.targetTranslation
-            } else {
-                layer.position.x = base + paging.presented
-            }
-            CATransaction.commit()
-            // 弹簧已经在走:从松手那一帧的位置接上同一条曲线,避免后到的邻图从旁边跳进来。
-            if paging.settling, let release = paging.release {
-                addPagingSpring(
-                    on: layer,
-                    from: base + paging.releaseTranslation,
-                    to: base + paging.targetTranslation,
-                    release: release,
-                    duration: paging.springDuration,
-                    beginTime: paging.animationStart
-                )
-            }
-            if paging.needsRebuild {
-                tryRebasePending()
-            }
-        }
-
-        private func endPaging(cancelled: Bool) {
-            guard paging.active, !paging.settling else { return }
-            let generation = paging.generation
-            let width = clipView.bounds.width
-            var direction = 0
-            if !cancelled, !paging.needsRebuild {
-                let translation = ImageHandoff.pagingDecisionTranslation(
-                    presented: paging.presented,
-                    grabbedFromCommit: paging.grabbedFromCommit,
-                    grabTranslation: paging.grabTranslation
-                )
-                direction = ImageHandoff.commitDirection(
-                    translation: translation,
-                    velocity: paging.velocity,
-                    viewportWidth: width
-                )
-                if parent.neighbors.url(direction: direction) == nil { direction = 0 }
-            }
-            paging.grabbedFromCommit = false
-            if direction != 0 {
-                ensureNeighbor(direction: direction)
-                let leaving = paging.displayedURL ?? currentURL
-                let arriving = parent.neighbors.url(direction: direction)
-                paging.committedDirection = direction
-                paging.originURL = leaving
-                paging.committedURL = arriving
-                paging.displayedURL = arriving ?? paging.displayedURL
-                paging.restingTranslation = 0
-                if let arriving {
-                    paging.pendingURLs.append(arriving)
-                    if paging.pendingURLs.count > 8 {
-                        paging.pendingURLs.removeFirst(paging.pendingURLs.count - 8)
-                    }
-                }
-                // 先标成弹簧,同步进来的刷新才不会把覆盖层摘掉。选中马上换,不等弹簧停。
-                paging.settling = true
-                if arriving != nil {
-                    parent.neighbors = parent.onStep(direction)
-                }
-            } else {
-                paging.committedDirection = 0
-                paging.settling = true
-            }
-            let target = direction == 0
-                ? paging.restingTranslation
-                : ImageHandoff.commitTranslation(direction: direction, viewportWidth: width)
-            let velocity = max(-8000, min(8000, paging.velocity))
-            animatePaging(to: target, velocity: velocity) { [weak self] in
-                self?.finishPaging(generation: generation, direction: direction)
-            }
-        }
-
-        private func animatePaging(to translation: CGFloat, velocity: CGFloat, completion: @escaping () -> Void) {
-            guard paging.currentLayer != nil else {
-                completion()
-                return
-            }
-            let fromTranslation = currentVisualShift()
-            let release = ImageHandoff.pagingRelease(distance: translation - fromTranslation, velocity: velocity)
-            let probe = makePagingSpring(from: fromTranslation, to: translation, release: release)
-            let duration = max(probe.settlingDuration, 0.01)
-            paging.release = release
-            paging.releaseTranslation = fromTranslation
-            paging.targetTranslation = translation
-            paging.springDuration = duration
-            paging.animationStart = CACurrentMediaTime()
-            let slots = paging.slots
-            // 模型先放到终点。显式弹簧要在关掉隐式动作的事务之外再挂,否则这一段会被吃掉,画面直接跳到终点。
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            for slot in slots {
-                slot.layer.position.x = slot.base + translation
-            }
-            CATransaction.commit()
-            for slot in slots {
-                addPagingSpring(
-                    on: slot.layer,
-                    from: slot.base + fromTranslation,
-                    to: slot.base + translation,
-                    release: release,
-                    duration: duration,
-                    beginTime: nil
-                )
-            }
-            let nanos = UInt64((duration + 0.02) * 1_000_000_000)
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: nanos)
-                completion()
-            }
-        }
-
-        private func makePagingSpring(from: CGFloat, to: CGFloat, release: ImageHandoff.PagingRelease) -> CASpringAnimation {
-            let spring = CASpringAnimation(perceptualDuration: release.perceptualDuration, bounce: release.bounce)
-            spring.keyPath = "position.x"
-            spring.fromValue = from
-            spring.toValue = to
-            spring.initialVelocity = release.initialVelocity
-            spring.fillMode = .both
-            spring.isRemovedOnCompletion = false
-            return spring
-        }
-
-        /// `beginTime` 用松手那一刻,后装上的邻图才能落在同一帧,而不是从头再滑一遍。
-        private func addPagingSpring(
-            on layer: CALayer,
-            from: CGFloat,
-            to: CGFloat,
-            release: ImageHandoff.PagingRelease,
-            duration: CFTimeInterval,
-            beginTime: CFTimeInterval?
-        ) {
-            let spring = makePagingSpring(from: from, to: to, release: release)
-            spring.duration = duration
-            if let beginTime {
-                spring.beginTime = beginTime
-            }
-            layer.add(spring, forKey: "paging")
-        }
-
-        private func finishPaging(generation: Int, direction: Int) {
-            guard handoffGeneration == generation, paging.settling else { return }
-            let stepped = paging.committedDirection != 0
-            paging = Paging()
-            if direction == 0 || stepped {
-                // 选中在松手时已经换过。这里只揭开下面那张,不再翻一次。
-                beginHandoff(restoreImage: true)
-                return
-            }
-            skipNextEntry = true
-            pagingPendingCommit = true
-            let urlBefore = currentURL
-            let handoff = handoffGeneration
-            parent.neighbors = parent.onStep(direction)
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 80_000_000)
-                guard let self,
-                      self.pagingPendingCommit,
-                      self.currentURL == urlBefore,
-                      self.handoffGeneration == handoff else { return }
-                self.beginHandoff(restoreImage: true)
-            }
-        }
-
-        private func prefetchNeighbors(maxPixel: CGFloat) {
-            let urls = parent.neighbors.urls
-            guard !urls.isEmpty else { return }
-            for url in urls {
-                ImageLoader.prefetchDisplay(url: url, maxPixelSize: maxPixel)
-            }
-        }
-
-        private func displayMaxPixel() -> CGFloat {
-            let size = clipView.bounds.size
-            // 按点数 × backing 请求;窗口未挂时按 2x。
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            return max(2048, CGFloat(Int(max(size.width, size.height))) * backing)
-        }
-
-        private func setDisplayImage(_ image: NSImage?, facts: ImageLoader.SourceFacts, url: URL) {
-            parent.onLoadingChange(false)
-            isFullResolution = false
-            guard let image, facts.pixelWidth > 0 else {
-                imageView.image = nil
-                parent.onImageInfo(DisplayImageInfo())
-                return
-            }
-            truePixelSize = CGSize(width: facts.pixelWidth, height: facts.pixelHeight)
-            bitmapPixelSize = truePixelSize
-            isRotatedBitmap = false
-            appliedRotationCount = 0   // 新图从 0 角度起,store 侧计数也已归零
-            frameCount = max(1, facts.frameCount)
-            parent.onRotationChange(false)   // 新图从文件解码,不继承上一张的旋转
-            parent.onImageInfo(DisplayImageInfo(
-                pixelWidth: facts.pixelWidth,
-                pixelHeight: facts.pixelHeight,
-                frameCount: facts.frameCount,
-                formatName: MetadataService.formatName(of: facts.formatID)
-            ))
-            imageView.image = image
-            applyOpenZoom()
-            if facts.frameCount > 1 {
-                startAnimation(url: url)
-            }
-        }
-
         // MARK: 动图(GIF / APNG)
 
         /// 动画代数:切换图片时递增,使旧动画的帧回调失效
-        private final class AnimationState: @unchecked Sendable {
+        final class AnimationState: @unchecked Sendable {
             private let lock = NSLock()
             private var generation = 0
             @discardableResult
@@ -1274,22 +462,21 @@ struct ImageViewCanvas: NSViewRepresentable {
             }
         }
 
-        private let animState = AnimationState()
+        let animState = AnimationState()
 
         /// CLT SDK 提供 block 版本 API:block 在主队列按帧回调,stop 指针停止播放
-        private func startAnimation(url: URL) {
+        func startAnimation(url: URL) {
             let generation = animState.advance()
             let displaySize = imageView.image?.size ?? .zero
+            let state = animState
             animationTask = Task.detached(priority: .userInitiated) { [weak self] in
-                guard let self else { return }
-                let state = self.animState
-                CGAnimateImageAtURLWithBlock(url as CFURL, nil as CFDictionary?) { _, frame, stop in
-                    guard state.isCurrent(generation) else {
+                CGAnimateImageAtURLWithBlock(url as CFURL, nil as CFDictionary?) { [weak self] _, frame, stop in
+                    guard let self, state.isCurrent(generation) else {
                         stop.pointee = true
                         return
                     }
                     Task { @MainActor [weak self] in
-                        guard let self else { return }
+                        guard let self, state.isCurrent(generation) else { return }
                         guard self.currentURL == url else {
                             self.animState.advance()
                             return
@@ -1303,1034 +490,11 @@ struct ImageViewCanvas: NSViewRepresentable {
             }
         }
 
-        private func stopAnimation() {
+        func stopAnimation() {
             animState.advance()
             animationTask?.cancel()
             animationTask = nil
         }
 
-        // MARK: 布局与缩放
-
-        private var imageSize: CGSize {
-            imageView.image?.size ?? .zero
-        }
-
-        private func handleLayout() {
-            guard !mutatingCanvas, imageView.image != nil else { return }
-            // 捏合手势进行中(bounds 尺寸被 magnification 改变),不干预布局
-            guard abs(scrollView.magnification - 1) < 0.001 else { return }
-            let newFit = fitScaleValue()
-            guard abs(newFit - fitScale) > 0.001 else { return }
-            debugLog("handleLayout fitChange \(fitScale) -> \(newFit) wasFit=\(wasFit)")
-            fitScale = newFit
-            if wasFit {
-                applyFit()
-                // 窗口拉大或进全屏后,原来那张降采样位图会发虚,停稳后再升到够用的像素
-                scheduleEscalateCheck()
-            } else if scale < minScale {
-                applyScale(minScale, anchor: visibleCenter())
-            }
-        }
-
-        /// 换屏 / 改缩放。适配模式按新视口重铺并升像素;已缩放则保持同一「实际大小」百分比。
-        private func handleDisplayChange() {
-            guard imageView.image != nil, abs(scrollView.magnification - 1) < 0.001 else { return }
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            if !wasFit, lastBacking > 0, abs(backing - lastBacking) > 0.01, truePixelSize.width > 0 {
-                let kept = imageView.frame.width * lastBacking * scrollView.magnification / truePixelSize.width
-                lastBacking = backing
-                applyEffectiveScale(kept, backing: backing, animated: false)
-            } else {
-                lastBacking = backing
-                if wasFit { applyFit() }
-            }
-            scheduleEscalateCheck()
-        }
-
-        private func fitScaleValue() -> CGFloat {
-            guard imageSize.width > 0, imageSize.height > 0 else { return 1 }
-            let clip = clipView.bounds.size
-            guard clip.width > 0, clip.height > 0 else { return 1 }
-            return min(clip.width / imageSize.width, clip.height / imageSize.height)
-        }
-
-        private func applyFit() {
-            // 防御:任何残留的手势缩放都会叠加在适配结果上,先归一
-            if abs(scrollView.magnification - 1) > 0.0005 { scrollView.magnification = 1 }
-            fitScale = fitScaleValue()
-            scale = fitScale
-            wasFit = true
-            updateFrameCentered()
-            notifyScale()
-        }
-
-        /// 切图时按偏好套用默认缩放(瞬时,不走平滑动画)
-        private func applyOpenZoom() {
-            switch parent.openZoomMode {
-            case .fit:
-                applyFit()
-            case .actualSize:
-                applyActualSizeImmediate()
-            }
-        }
-
-        private func applyActualSizeImmediate() {
-            if abs(scrollView.magnification - 1) > 0.0005 { scrollView.magnification = 1 }
-            fitScale = fitScaleValue()
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            applyEffectiveScale(1, backing: backing, animated: false)
-            notifyScale()
-            scheduleEscalateCheck()
-        }
-
-        /// 按「源像素 : 屏幕物理像素」的倍数缩放(1.0 = 实际大小),与状态栏读数同语义。
-        /// 必须换算回当前位图的坐标系:浏览位图是降采样过的,直接拿 1/backing 当 scale
-        /// 会让 100% 只到 (降采样上限 / 原图尺寸)——4000px 的图在 2x 屏上只有 70%。
-        private func applyEffectiveScale(_ factor: CGFloat, backing: CGFloat, animated: Bool) {
-            guard imageSize.width > 0, truePixelSize.width > 0 else { return }
-            let target = max(factor * truePixelSize.width / backing / imageSize.width, minScale)
-            wasFit = false
-            if animated {
-                startSmoothZoom(to: target, anchor: visibleCenter(), duration: 0.22)
-            } else {
-                // 走 updateFrameCentered 而不是 applyScale:后者在 target == scale 时会提前返回,
-                // 换图后若新旧缩放比恰好相同就会漏掉这次 frame 更新。
-                scale = target
-                updateFrameCentered()
-            }
-        }
-
-        private func updateFrameCentered() {
-            guard imageSize.width > 0 else { return }
-            let size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-            let origin = ZoomMath.constrainedOrigin(
-                proposed: .zero,
-                docSize: size,
-                clipSize: clipView.bounds.size
-            )
-            commitCanvasChange {
-                applyDocument(size: size, origin: origin, snap: true)
-            }
-        }
-
-        func performZoom(_ action: ZoomAction) {
-            debugLog("performZoom \(action) begin")
-            guard imageView.image != nil else { return }
-            defer { lateCheck("afterZoom\(action == .fit ? "Fit" : action == .actualSize ? "Actual" : action == .zoomIn ? "In" : "Out")") }
-            switch action {
-            case .fit:
-                absorbMagnification()
-                startSmoothZoom(to: fitScaleValue(), anchor: visibleCenter(),
-                                duration: 0.22, completesAsFit: true)
-            case .actualSize:
-                absorbMagnification()
-                if isFullResolution {
-                    setAbsoluteActualSize()
-                } else {
-                    escalate { [weak self] in
-                        self?.setAbsoluteActualSize()
-                    }
-                }
-            case .zoomIn:
-                absorbMagnification()
-                smoothZoom(multiplyingBy: 1.25, anchor: visibleCenter(), duration: 0.22)
-            case .zoomOut:
-                absorbMagnification()
-                smoothZoom(multiplyingBy: 0.8, anchor: visibleCenter(), duration: 0.22)
-            case .scale(let factor):
-                absorbMagnification()
-                let backing = scrollView.window?.backingScaleFactor ?? 2
-                applyEffectiveScale(factor, backing: backing, animated: true)
-            }
-        }
-
-        /// 可视区域中心(clip 视图本地坐标)
-        private func visibleCenter() -> CGPoint {
-            CGPoint(x: clipView.bounds.width / 2, y: clipView.bounds.height / 2)
-        }
-
-        /// 缩放下限:允许缩小到适配档的 1/10(小图在"适配"时是放大态,也允许继续缩小)
-        private var minScale: CGFloat {
-            min(fitScale, 1) * 0.1
-        }
-
-        /// 实际大小:1 图像像素 = 1 屏幕物理像素
-        private func setAbsoluteActualSize() {
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            startSmoothZoom(to: 1 / backing, anchor: visibleCenter(), duration: 0.22)
-        }
-
-        private func toggleZoom(at location: CGPoint) {
-            guard imageView.image != nil else { return }
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            let effective = effectiveScale(backing: backing)
-            if wasFit || effective < 0.35 {
-                performZoom(.actualSize)
-            } else {
-                applyFit()
-            }
-        }
-
-        // MARK: 平滑缩放(显示链路按时长缓出)
-
-        private var zoomLink: CADisplayLink?
-        private var zoomTarget: CGFloat?
-        private var zoomStart: CGFloat = 1
-        private var zoomStartTime: CFTimeInterval = 0
-        private var zoomDuration: CFTimeInterval = 0.22
-        private var zoomAnchorPoint: CGPoint = .zero
-        private var zoomCompletesAsFit = false
-
-        /// 滚轮 / 按钮 / 捏合:目标倍率累积,按剩余时长缓出,连点是一次连贯运动。
-        private func smoothZoom(multiplyingBy factor: CGFloat, anchor: CGPoint?, duration: CFTimeInterval) {
-            guard imageView.image != nil else { return }
-            wasFit = false
-            let b = clipView.bounds
-            var pt = anchor ?? visibleCenter()
-            // 锚点是 clip 本地坐标(0..size)。夹取必须按尺寸,不能用 bounds.minX/maxX——
-            // 那是文档坐标(含滚动 origin),深缩放时 origin 超过锚点后会把锚点
-            // 强行抬到 origin 上,缩放就围绕视口角落转,画面整体向右上漂移。
-            pt.x = min(max(pt.x, 0), b.width)
-            pt.y = min(max(pt.y, 0), b.height)
-            let base = zoomTarget ?? scale
-            startSmoothZoom(to: base * factor, anchor: pt, duration: duration)
-        }
-
-        private func startSmoothZoom(to targetRaw: CGFloat, anchor: CGPoint,
-                                     duration: CFTimeInterval, completesAsFit: Bool = false) {
-            let target = min(max(targetRaw, minScale), 64)
-            guard abs(target - scale) > 0.0005 else {
-                if completesAsFit { applyFit() }
-                cancelSmoothZoom()
-                return
-            }
-            zoomAnchorPoint = anchor
-            zoomTarget = target
-            zoomStart = scale
-            zoomDuration = max(duration, 0.04)
-            zoomStartTime = CACurrentMediaTime()
-            zoomCompletesAsFit = completesAsFit
-            wasFit = false
-            startZoomLinkIfNeeded()
-        }
-
-        private func startZoomLinkIfNeeded() {
-            guard zoomLink == nil else { return }
-            let proxy = ZoomTickProxy()
-            proxy.coordinator = self
-            let link = imageView.displayLink(target: proxy,
-                                             selector: #selector(ZoomTickProxy.tick(_:)))
-            proxy.link = link
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
-            link.add(to: .main, forMode: .common)
-            zoomLink = link
-        }
-
-        private func cancelSmoothZoom() {
-            zoomLink?.invalidate()
-            zoomLink = nil
-            zoomTarget = nil
-            zoomCompletesAsFit = false
-        }
-
-        func zoomTick() {
-            guard imageView.image != nil, let target = zoomTarget else {
-                cancelSmoothZoom()
-                return
-            }
-            let t = min(1, (CACurrentMediaTime() - zoomStartTime) / zoomDuration)
-            // ease-out cubic: 起手干脆,收尾不硬切
-            let eased = 1 - pow(1 - t, 3)
-            let next = zoomStart + (target - zoomStart) * CGFloat(eased)
-            if t >= 1 {
-                let asFit = zoomCompletesAsFit
-                applyScale(target, anchor: zoomAnchorPoint, settling: true)
-                cancelSmoothZoom()
-                if asFit { wasFit = true }
-                // 动画收尾:执行等待中的全尺寸换图(等尺寸、中心保持,视觉无感)
-                if let apply = pendingEscalateApply {
-                    pendingEscalateApply = nil
-                    apply()
-                }
-            } else {
-                applyScale(next, anchor: zoomAnchorPoint, settling: false)
-            }
-        }
-
-        /// 弱引用代理:NSView.displayLink 强持有 target,直接传 self 会形成保留环
-        @MainActor
-        private final class ZoomTickProxy: NSObject {
-            weak var coordinator: Coordinator?
-            weak var link: CADisplayLink?
-            var lastTick: CFTimeInterval = 0
-            @objc func tick(_ sender: CADisplayLink) {
-                guard let coordinator else {
-                    link?.invalidate()
-                    return
-                }
-                // 临时性能测量:--zoom-debug 下打印帧间隔,定位卡顿
-                if coordinator.zoomDebug {
-                    let now = CACurrentMediaTime()
-                    if lastTick > 0 {
-                        let delta = (now - lastTick) * 1000
-                        if delta > 25 {   // 正常 60-120fps 是 8-17ms,超过 25ms 记为掉帧
-                            FileHandle.standardError.write(Data("[perf] tick gap \(Int(delta))ms\n".utf8))
-                        }
-                    }
-                    lastTick = now
-                }
-                coordinator.zoomTick()
-            }
-        }
-
-        private func commitCanvasChange(_ body: () -> Void) {
-            mutatingCanvas = true
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            body()
-            CATransaction.commit()
-            clipView.pinnedOrigin = nil
-            mutatingCanvas = false
-        }
-
-        /// 写入文档尺寸与取景。动画过程不对齐像素(避免逐帧台阶),停稳后再贴 backing。
-        private func applyDocument(size: CGSize, origin: NSPoint, snap: Bool) {
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            let outSize = snap
-                ? CGSize(width: ZoomMath.snapped(size.width, backing: backing),
-                         height: ZoomMath.snapped(size.height, backing: backing))
-                : size
-            let outOrigin = snap ? ZoomMath.snappedPoint(origin, backing: backing) : origin
-            clipView.pinnedOrigin = outOrigin
-            imageView.frame = NSRect(origin: .zero, size: outSize)
-            clipView.setBoundsOrigin(outOrigin)
-            scrollView.reflectScrolledClipView(clipView)
-        }
-
-        /// 核心缩放:内容随 frame 伸缩,锚点(本地坐标)指向的内容点保持不动
-        private func applyScale(_ newScale: CGFloat, anchor: CGPoint,
-                                resetMagnification: Bool = false, settling: Bool = true) {
-            guard imageView.image != nil, imageSize.width > 0, scale > 0 else { return }
-            let clamped = min(max(newScale, minScale), 64)
-            guard clamped != scale || resetMagnification else {
-                debugLog("applyScale SKIPPED clamped==scale")
-                return
-            }
-            debugLog("applyScale from=\(scale) to=\(clamped) anchor=(\(anchor.x), \(anchor.y))")
-            commitCanvasChange {
-                if resetMagnification { scrollView.magnification = 1 }
-                let oldDoc = imageView.frame.size.width > 0
-                    ? imageView.frame.size
-                    : CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-                let newSize = CGSize(width: imageSize.width * clamped, height: imageSize.height * clamped)
-                let ratio = oldDoc.width > 0 ? newSize.width / oldDoc.width : 1
-                let zoomAnchor = resetMagnification ? visibleCenter() : anchor
-                let anchored = ZoomMath.anchoredOrigin(
-                    oldOrigin: clipView.bounds.origin,
-                    anchor: zoomAnchor,
-                    docSize: oldDoc,
-                    ratio: ratio
-                )
-                let origin = ZoomMath.constrainedOrigin(
-                    proposed: anchored,
-                    docSize: newSize,
-                    clipSize: clipView.bounds.size
-                )
-                applyDocument(size: newSize, origin: origin, snap: settling)
-                if settling, imageSize.width > 0 {
-                    scale = imageView.frame.width / imageSize.width
-                } else {
-                    scale = clamped
-                }
-            }
-            debugLog("applyScale done")
-            notifyScale()
-            if settling {
-                scheduleEscalateCheck()
-            }
-        }
-
-        /// 百分比语义:每个图像源像素对应多少屏幕物理像素。
-        /// 必须除以源图像素(truePixelSize)而不是当前位图——否则升级换图的瞬间
-        /// 位图变宽、同一画面读数会腰斩(90%→45%)。DPI 标注的文件按真实像素如实呈现。
-        private func effectiveScale(backing: CGFloat) -> CGFloat {
-            let frameWidth = imageView.frame.width
-            if frameWidth > 0, truePixelSize.width > 0 {
-                return frameWidth * backing * scrollView.magnification / truePixelSize.width
-            }
-            return scale * scrollView.magnification
-        }
-
-        private func notifyScale() {
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            let value = effectiveScale(backing: backing)
-            let percent = Int((value * 100).rounded())
-            guard percent != lastNotifiedPercent else { return }
-            lastNotifiedPercent = percent
-            debugLog("notify percent=\(percent)% frameW=\(imageView.frame.width) trueW=\(truePixelSize.width)")
-            parent.onScaleChange(value)
-        }
-
-        /// 上次用来解释「实际大小」的屏幕倍率。换屏时用它把百分比换算到新屏。
-        private var lastBacking: CGFloat = 0
-
-        /// 等平滑缩放停稳再升级,避免解码完成时叠在动画尾帧上造成一次位移
-        private func scheduleEscalateCheck() {
-            escalateWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                self?.maybeEscalate()
-            }
-            escalateWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
-        }
-
-        /// 缩放后如果当前表示的像素不足以清晰呈现,加载全尺寸替换(视觉尺寸保持不变)
-        private func maybeEscalate() {
-            guard !isFullResolution, !escalating, !isRotatedBitmap, zoomTarget == nil,
-                  frameCount <= 1,
-                  let image = imageView.image,
-                  let rep = image.representations.first, rep.pixelsWide > 0 else { return }
-            let backing = scrollView.window?.backingScaleFactor ?? 2
-            let displayedPx = imageView.frame.width * backing
-            // 基准是「当前位图的真实像素」,不是源图像素。
-            // 浏览位图是降采样过的,拿源图尺寸当基准会让 100% 缩放时仍停在插值画质:
-            // 4000px 的图以 2800px 位图显示到 4000 设备像素,判定 4000 > 4200 为假,永远不升级。
-            // 系数 0.9 让全尺寸在到达 100% 之前就位。
-            if displayedPx > CGFloat(rep.pixelsWide) * 0.9 {
-                // 已有待执行的换图(等动画结束)时不重复触发
-                guard pendingEscalateApply == nil else { return }
-                escalate {}
-            }
-        }
-
-        private func escalate(completion: @escaping () -> Void) {
-            // 动图跳过:没有更高分辨率可升,解码出来的静态帧会被下一帧动画覆盖
-            guard let url = currentURL, !escalating, frameCount <= 1 else {
-                completion()
-                return
-            }
-            escalating = true
-            Task { [weak self] in
-                guard let self else { return }
-                let full: NSImage? = await Task.detached(priority: .userInitiated) {
-                    try? ImageLoader.decode(url: url, maxPixelSize: nil)
-                }.value
-                defer {
-                    self.escalating = false
-                    completion()
-                }
-                guard !Task.isCancelled, self.currentURL == url, let full,
-                      full.size.width > 0 else { return }
-                // 缩放动画进行中:推迟到动画结束再换图,手势全程零不连续。
-                // (换图本身视觉无感,但叠在手势中途的任何时序误差都会被感知为"漂移")
-                if self.zoomTarget != nil {
-                    self.pendingEscalateApply = { [weak self] in
-                        self?.applyEscalatedImage(full, url: url)
-                    }
-                } else {
-                    self.applyEscalatedImage(full, url: url)
-                }
-            }
-        }
-
-        /// 把解码完成的全尺寸位图换入画布(等尺寸、视口中心保持,视觉无感)。
-        /// 调用时机:不在平滑缩放动画中途。
-        private func applyEscalatedImage(_ full: NSImage, url: URL) {
-            guard currentURL == url, !isRotatedBitmap,
-                  full.size.width > 0 else { return }
-            // 以解码完成时的实时视觉尺寸换算:
-            // 加载期间用户的缩放/平移不能被解码开始前的快照覆盖(延迟回跳的根源)
-            let visual = imageView.frame.size
-            let origin = clipView.bounds.origin
-            guard visual.width > 0 else { return }
-            let newScale = min(max(visual.width / full.size.width, minScale), 64)
-            let newSize = CGSize(width: full.size.width * newScale, height: full.size.height * newScale)
-            let kept = ZoomMath.originKeepingVisibleCenter(
-                oldOrigin: origin,
-                oldDoc: visual,
-                newDoc: newSize,
-                clipSize: clipView.bounds.size
-            )
-            // scale 的单位是"占 NSImage 点尺寸的比例",位图从降采样换成全尺寸后单位变了。
-            // 进行中的平滑缩放(zoomTarget/zoomStart)必须同步换算到新单位,否则动画会
-            // 套用旧目标导致画面瞬间跳大/缩放读数闪跳——缩放跨过升级阈值时必现的卡顿。
-            let oldBitmapW = bitmapPixelSize.width
-            let fullBitmapW = CGFloat(full.representations.first?.pixelsWide ?? Int(full.size.width))
-            let unitRatio = oldBitmapW > 0 && fullBitmapW > 0 ? oldBitmapW / fullBitmapW : 1
-            commitCanvasChange {
-                self.imageView.image = full
-                self.bitmapPixelSize = CGSize(
-                    width: full.representations.first?.pixelsWide ?? Int(full.size.width),
-                    height: full.representations.first?.pixelsHigh ?? Int(full.size.height)
-                )
-                self.isFullResolution = true
-                self.scale = newScale
-                self.applyDocument(size: newSize, origin: kept, snap: true)
-                self.fitScale = self.fitScaleValue()
-                if self.zoomTarget != nil, unitRatio != 1 {
-                    self.zoomTarget = self.zoomTarget! * unitRatio
-                    self.zoomStart *= unitRatio
-                }
-            }
-            notifyScale()
-        }
-
-        private func pan(by delta: CGSize) {
-            guard imageView.image != nil else { return }
-            wasFit = false
-            let proposed = NSPoint(
-                x: clipView.bounds.origin.x - delta.width,
-                y: clipView.bounds.origin.y - delta.height
-            )
-            let origin = ZoomMath.constrainedOrigin(
-                proposed: proposed,
-                docSize: imageView.frame.size,
-                clipSize: clipView.bounds.size
-            )
-            commitCanvasChange {
-                applyDocument(size: imageView.frame.size, origin: origin, snap: true)
-            }
-        }
-
-        // MARK: 旋转
-
-        /// 顺时针旋转 90°(可叠加):直接旋转位图后替换 image。
-        /// 替换后宽高已对调,bitmapPixelSize 同步翻转,缩放读数/升级判定保持正确。
-        /// 图片未就绪时返回 false(调用方保留差额,待就绪后重试)。
-        @discardableResult
-        func performRotate() -> Bool {
-            if paging.active { beginHandoff(restoreImage: true) }
-            guard imageView.image != nil,
-                  let cg = imageView.image?.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                  let rotated = ImageLoader.rotatedCW90(cg) else { return false }
-            cancelSmoothZoom()
-            absorbMagnification()
-            // 动图每帧会用原始帧重建 NSImage,会覆盖旋转结果;先停播再转(静态呈现当前帧的旋转变体)
-            stopAnimation()
-            let newImage = NSImage(cgImage: rotated, size: NSSize(width: cg.height, height: cg.width))
-            commitCanvasChange {
-                self.imageView.image = newImage
-                self.bitmapPixelSize = CGSize(width: cg.height, height: cg.width)
-                self.isRotatedBitmap = true   // 位图已重排:不再升级解码(会覆盖旋转),读数以位图为准
-                self.isFullResolution = true
-                self.applyFit()
-            }
-            parent.onRotationChange(true)
-            debugLog("performRotate applied")
-            return true
-        }
-    }
-}
-
-/// 跟手翻页这一下的位移和图层。只在主线程读写。
-/// 上一张、当前、下一张都直接挂在覆盖层上,手指把它们一起平移。
-private struct Paging {
-    var active = false
-    var settling = false
-    var generation = 0
-    var rawTranslation: CGFloat = 0
-    var presented: CGFloat = 0
-    var velocity: CGFloat = 0
-    var lastTime: TimeInterval = 0
-    var currentLayer: CALayer?
-    var previousLayer: CALayer?
-    var nextLayer: CALayer?
-    /// 位移为 0 时各图的 position.x。
-    var currentBase: CGFloat = 0
-    var previousBase: CGFloat = 0
-    var nextBase: CGFloat = 0
-    /// 松手那一帧的位移,和弹簧要去的位移。后到的邻图用同一段曲线补上。
-    var releaseTranslation: CGFloat = 0
-    var targetTranslation: CGFloat = 0
-    var release: ImageHandoff.PagingRelease?
-    var springDuration: CFTimeInterval = 0
-    var animationStart: CFTimeInterval = 0
-    var loadingDirections: Set<Int> = []
-    /// 松手时已经交给列表的方向。非 0 表示三条图还是翻页前的,弹簧正在把邻图送到中间。
-    var committedDirection: Int = 0
-    /// 这条画布上居中的那张。SwiftUI 可能还没刷新,不能只看 currentURL。
-    var displayedURL: URL?
-    /// 这次提交离开的那张。接住之后它变成另一侧的邻图。
-    var originURL: URL?
-    /// 这次提交要落到的那张。
-    var committedURL: URL?
-    var previousURL: URL?
-    var nextURL: URL?
-    /// 翻页自己提交过、画布还没消化的 URL。这些刷新不能再播一段滑入,也不能摘掉覆盖层。
-    var pendingURLs: [URL] = []
-    /// 弹簧没停时又按住,并且已经把刚翻到的那张当成当前图。
-    /// 下一次松手按相对接住点的位移算,不能把没走完的弹簧当成往回翻。
-    var grabbedFromCommit = false
-    var grabTranslation: CGFloat = 0
-    /// 不再翻页时弹簧要停的位置。邻图还没装上时停在这次提交的落点,而不是旧图中心。
-    var restingTranslation: CGFloat = 0
-    var needsRebuild = false
-    var rebaseDirection: Int = 0
-    var rebuildCommit: CGFloat = 0
-
-    struct Slot {
-        var layer: CALayer
-        var base: CGFloat
-    }
-
-    var slots: [Slot] {
-        var result: [Slot] = []
-        if let currentLayer {
-            result.append(Slot(layer: currentLayer, base: currentBase))
-        }
-        if let previousLayer {
-            result.append(Slot(layer: previousLayer, base: previousBase))
-        }
-        if let nextLayer {
-            result.append(Slot(layer: nextLayer, base: nextBase))
-        }
-        return result
-    }
-}
-
-/// 切图前的旧图:位图、缩放,以及当时的文档 frame 和 clip bounds.origin。
-private struct OutgoingSnapshot {
-    var contents: Any
-    var contentsScale: CGFloat
-    var frame: CGRect
-    var boundsOrigin: CGPoint
-}
-
-/// 盖在视口上的过渡层。根图层归自己管,子图层滑动不会被 AppKit 再画一份。
-private final class HandoffOverlay: NSView {
-    let hostLayer = CALayer()
-
-    override var isOpaque: Bool { false }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        hostLayer.masksToBounds = true
-        hostLayer.isOpaque = false
-        hostLayer.backgroundColor = nil
-        layer = hostLayer
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        hostLayer.frame = bounds
-    }
-}
-
-// MARK: - AppKit 子类
-
-/// 0 宽且不绘制,让 NSScrollView 仍处理滚轮平移,画面上不出条子。
-private final class HiddenScroller: NSScroller {
-    override func draw(_ dirtyRect: NSRect) {}
-    override class var isCompatibleWithOverlayScrollers: Bool { true }
-    override class func scrollerWidth(for controlSize: NSControl.ControlSize,
-                                      scrollerStyle: NSScroller.Style) -> CGFloat { 0 }
-}
-
-/// 捏合手势自己处理,避免 NSScrollView.magnification 在松手时再兑换一次 frame。
-final class CanvasScrollView: NSScrollView {
-    var onMagnifyDelta: ((CGFloat, CGPoint) -> Void)?
-    var onSmartZoom: (() -> Void)?
-
-    override func tile() {
-        super.tile()
-        verticalScroller?.alphaValue = 0
-        horizontalScroller?.alphaValue = 0
-    }
-
-    override func magnify(with event: NSEvent) {
-        let loc = contentView.convert(event.locationInWindow, from: nil)
-        onMagnifyDelta?(event.magnification, loc)
-    }
-
-    override func smartMagnify(with event: NSEvent) {
-        onSmartZoom?()
-    }
-}
-
-/// 居中裁剪视图:文档小于可视区时居中。
-/// ⌘/⌥ 滚轮缩放与左右方向键由本类处理。
-final class CanvasClipView: NSClipView {
-
-    var onZoomDelta: ((CGFloat, CGPoint) -> Void)?
-    var onStep: ((Int) -> Void)?
-    var onLayoutChange: (() -> Void)?
-    /// 窗口换了屏幕或缩放倍率
-    var onDisplayChange: (() -> Void)?
-    var onSmartZoom: (() -> Void)?
-    /// 横滑切图提交。方向语义全项目统一:+1 = 下一张,-1 = 上一张
-    var onHorizontalSwipe: ((Int) -> Void)?
-    /// 跟手翻页。返回 true 表示这次触控板横滑已接管,不再走阈值提交。
-    var onHorizontalPan: ((CGFloat, NSEvent.Phase, TimeInterval) -> Bool)?
-    /// applyDocument 写入期间锁定 origin,防止 constrain 在同一拍改掉取景
-    var pinnedOrigin: NSPoint?
-    /// 画布背景(随偏好设置切换)。值没变就别置脏,否则每次 updateNSView 都会整块重绘。
-    var canvasBackground: CanvasBackground = .dark {
-        didSet { if oldValue != canvasBackground { needsDisplay = true } }
-    }
-
-    private var swipeAccumulatedDX: CGFloat = 0
-    private var swipeGestureActive = false
-    private var swipeCommittedThisGesture = false
-    /// 滚动事件已经接住跟手翻页。松手的 .ended 还要送进去。
-    private var pagingGestureActive = false
-    /// 松手后的惯性不再交给滚动视图。
-    private var swallowPagingMomentum = false
-    /// 提交防抖:两次提交至少间隔此秒数,兜住异常事件流(如未发 .ended 的手势)
-    private var lastSwipeCommitTime = TimeInterval(0)
-    private static let horizontalSwipeThreshold: CGFloat = 55
-    private static let swipeCommitMinInterval: TimeInterval = 0.30
-
-    /// 磨砂档必须交出不透明 —— 否则这块画布会盖住窗口背后的玻璃,磨砂就白做了。
-    /// 切换档位时 `canvasBackground` 的 `didSet` 会置脏,AppKit 会重新读一次这个属性。
-    override var isOpaque: Bool { !canvasBackground.isTranslucent }
-
-    override func draw(_ dirtyRect: NSRect) {
-        // 磨砂档不画底色,但**必须把这块擦成透明**:非不透明的视图不会自动清理自己的
-        // 绘制区域,只「跳过填充」会留下上一帧的残影。
-        if canvasBackground.isTranslucent {
-            NSColor.clear.set()
-            dirtyRect.fill(using: .clear)
-            return
-        }
-        canvasBackground.fill(dirtyRect)
-    }
-
-    override func scrollWheel(with event: NSEvent) {
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-#if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--zoom-debug") {
-            let b = bounds
-            FileHandle.standardError.write(Data(
-                "[scroll] dy=\(event.scrollingDeltaY) dx=\(event.scrollingDeltaX) phase=\(event.momentumPhase.rawValue)/\(event.phase.rawValue) loc=(\(event.locationInWindow.x - b.origin.x),\(event.locationInWindow.y)) origin=\(b.origin)\n".utf8))
-        }
-#endif
-        if mods.contains(.command) || mods.contains(.option) {
-            // 以光标为锚点缩放(与捏合语义一致)
-            onZoomDelta?(event.scrollingDeltaY * 0.01, convert(event.locationInWindow, from: nil))
-            return
-        }
-#if DEBUG
-        // 漂移实验开关:普通滚轮走捏合同一缩放路径,用真实 HID 事件验证锚定
-        if ProcessInfo.processInfo.arguments.contains("--zoom-scroll-test") {
-            onZoomDelta?(event.scrollingDeltaY * 0.01, convert(event.locationInWindow, from: nil))
-            return
-        }
-#endif
-        // 触控板双指横滑(|dx| 明显大于 |dy|)且文档横向不可滚动 → 切图手势;
-        // 其余(纵向滚动、惯性余量)交给系统滚动。
-        let dx = event.scrollingDeltaX
-        let dy = event.scrollingDeltaY
-        // 翻页跟手指,不跟系统「自然滚动」。panX > 0 是手指向右。
-        let panX = ImageHandoff.trackpadFingerDelta(dx, naturalScrolling: event.isDirectionInvertedFromDevice)
-        let fingerDown = event.phase.intersection([.began, .stationary, .changed, .ended, .cancelled]) != []
-        let momentum = event.momentumPhase != []
-        // 手指还在板上就清掉上一段惯性。否则连滑两三张后,新手势仍带着 momentum 标记,位移被整段丢掉,要等惯性结束才又动。
-        if fingerDown {
-            swallowPagingMomentum = false
-        }
-        // 上一段如果没收到松手,不能让它一直把后面的滚动都接走。
-        if event.phase.contains(.began) { pagingGestureActive = false }
-        if !fingerDown, ImageHandoff.shouldSwallowPagingMomentum(
-            fingerDown: false, momentum: momentum, armed: swallowPagingMomentum
-        ) {
-            if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
-                swallowPagingMomentum = false
-            }
-            return
-        }
-        let horizontal = abs(dx) > abs(dy) * 1.35 && abs(dx) > 0.4
-        let ending = event.phase.contains(.ended) || event.phase.contains(.cancelled)
-        if ImageHandoff.shouldTrackPagingScroll(
-            fingerDown: fingerDown,
-            momentum: momentum,
-            horizontal: horizontal,
-            gestureActive: pagingGestureActive,
-            documentScrollsHorizontally: isDocumentHorizontallyScrollable
-        ) {
-            if onHorizontalPan?(panX, event.phase, event.timestamp) == true {
-                pagingGestureActive = !ending
-                // 只在松手后吞惯性。移动过程中也吞的话,紧接着那批带 momentum 的事件会把这次滑动吃掉。
-                if ending { swallowPagingMomentum = true }
-                return
-            }
-            if ending { pagingGestureActive = false }
-        }
-        if abs(dx) > abs(dy) * 1.35, abs(dx) > 0.4,
-           !isDocumentHorizontallyScrollable,
-           event.phase != .ended, event.momentumPhase == [] {
-            swipeGestureActive = true
-            swipeAccumulatedDX += panX
-            // 一个手势只提交一张 + 两次提交至少隔 0.3s,双保险防长滑连切。
-            // 累积值已经是手指方向:向右 = 上一张,向左 = 下一张。
-            let now = CACurrentMediaTime()
-            if !swipeCommittedThisGesture,
-               now - lastSwipeCommitTime >= Self.swipeCommitMinInterval,
-               abs(swipeAccumulatedDX) >= Self.horizontalSwipeThreshold {
-                onHorizontalSwipe?(swipeAccumulatedDX > 0 ? -1 : 1)
-                swipeCommittedThisGesture = true
-                lastSwipeCommitTime = now
-                swipeAccumulatedDX = 0
-            }
-            return
-        }
-        if event.phase == .ended || (swipeGestureActive && event.momentumPhase != []) {
-            // 手势收尾/进入惯性:清账并解锁,不把残余位移误当新手势
-            swipeGestureActive = false
-            swipeCommittedThisGesture = false
-            swipeAccumulatedDX = 0
-            if event.momentumPhase != [] { return }
-        }
-        super.scrollWheel(with: event)
-    }
-
-    private var isDocumentHorizontallyScrollable: Bool {
-        guard let doc = documentView else { return false }
-        return doc.frame.width > bounds.width + 0.5
-    }
-
-    override func magnify(with event: NSEvent) {
-        enclosingScrollView?.magnify(with: event)
-    }
-
-    override func smartMagnify(with event: NSEvent) {
-        onSmartZoom?()
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let loc = convert(event.locationInWindow, from: nil)
-        if let doc = documentView, doc.frame.contains(loc) {
-            super.mouseDown(with: event)
-            return
-        }
-        if event.clickCount == 2 {
-            window?.zoom(self)
-            return
-        }
-        window?.performDrag(with: event)
-    }
-
-    override func moveLeft(_ sender: Any?) { onStep?(-1) }
-    override func moveRight(_ sender: Any?) { onStep?(1) }
-
-    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
-        var rect = proposedBounds
-        if let pinned = pinnedOrigin {
-            rect.origin = pinned
-            return rect
-        }
-        guard let doc = documentView?.frame else { return super.constrainBoundsRect(proposedBounds) }
-        let backing = window?.backingScaleFactor ?? 2
-        rect.origin = ZoomMath.snappedPoint(
-            ZoomMath.constrainedOrigin(
-                proposed: proposedBounds.origin,
-                docSize: doc.size,
-                clipSize: proposedBounds.size
-            ),
-            backing: backing
-        )
-        return rect
-    }
-
-    override func layout() {
-        super.layout()
-        onLayoutChange?()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        observeDisplay()
-        guard window != nil else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let window = self.window else { return }
-            if let responder = window.firstResponder, responder is NSTextView { return }
-            window.makeFirstResponder(self)
-        }
-    }
-
-    /// deinit 非隔离,观察者句柄只在这里摘除。
-    nonisolated(unsafe) private var displayObservers: [NSObjectProtocol] = []
-
-    deinit {
-        for observer in displayObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-    }
-
-    private func observeDisplay() {
-        for observer in displayObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        displayObservers.removeAll()
-        guard let window else { return }
-        for name in [NSWindow.didChangeScreenNotification, NSWindow.didChangeBackingPropertiesNotification] {
-            displayObservers.append(
-                NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated {
-                        self?.onDisplayChange?()
-                    }
-                }
-            )
-        }
-    }
-}
-
-/// 图片视图:双击切换缩放;鼠标拖拽按手势模式分流——
-/// 图片水平方向无溢出时,横向主导的拖动是「滑动切图」(阈值提交,防误触);
-/// 其余情况走平移。渲染走 layer.contents(GPU 纹理):缩放改 frame 只是几何变换,
-/// 不触发主线程按新尺寸重栅格化位图——丝滑的关键。
-final class CanvasImageView: NSImageView {
-
-    var onDoubleClick: (() -> Void)?
-    var onPan: ((CGSize) -> Void)?
-    /// 滑动切图提交。方向语义全项目统一:+1 = 下一张,-1 = 上一张
-    var onSwipe: ((Int) -> Void)?
-    /// 跟手拖拽。返回 true 表示已接管,松手不再按阈值另交一张。
-    var onSwipePan: ((CGFloat, Bool) -> Bool)?
-
-    private enum DragMode { case undecided, pan, swipe }
-    private var dragMode: DragMode = .undecided
-    private var mouseDownPoint: NSPoint?
-    private var lastDragPoint: NSPoint?
-    private var swipeTotalDX: CGFloat = 0
-    private static let swipeDecideThreshold: CGFloat = 10
-    private static let swipeCommitThreshold: CGFloat = 60
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        commonInit()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        commonInit()
-    }
-
-    private func commonInit() {
-        // 层托管(layer-hosting):自建 CALayer 并接管,
-        // AppKit 不再向层栅格化 draw(_) 内容,layer.contents 由本类独占管理
-        wantsLayer = true
-        let hostLayer = CALayer()
-        hostLayer.contentsGravity = .resize
-        hostLayer.minificationFilter = .trilinear
-        // 禁止 frame/contents 隐式动画,否则缩放停住后图层还会再滑一小段
-        hostLayer.actions = [
-            "bounds": NSNull(),
-            "position": NSNull(),
-            "contents": NSNull(),
-            "contentsScale": NSNull(),
-            "transform": NSNull(),
-        ]
-        layer = hostLayer
-        hostLayer.isOpaque = false
-        hostLayer.backgroundColor = NSColor.clear.cgColor
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        syncLayer()
-    }
-
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        syncLayer()
-    }
-
-    override var image: NSImage? {
-        get { super.image }
-        set {
-            let kept = frame
-            super.image = newValue
-            if frame != kept { frame = kept }
-            syncLayer()
-        }
-    }
-
-    private func syncLayer() {
-        guard let layer else { return }
-        layer.contentsScale = window?.backingScaleFactor ?? 2
-        layer.contents = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
-    }
-
-    /// 内容由 GPU 纹理呈现;AppKit 位图绘制通道关闭
-    override func draw(_ dirtyRect: NSRect) {}
-
-    override func magnify(with event: NSEvent) {
-        enclosingScrollView?.magnify(with: event)
-    }
-
-    override func smartMagnify(with event: NSEvent) {
-        enclosingScrollView?.smartMagnify(with: event)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            resetDragState()
-            onDoubleClick?()
-            return
-        }
-        dragMode = .undecided
-        mouseDownPoint = convert(event.locationInWindow, from: nil)
-        lastDragPoint = mouseDownPoint
-        swipeTotalDX = 0
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let start = mouseDownPoint, let last = lastDragPoint else { return }
-        let current = convert(event.locationInWindow, from: nil)
-        let total = CGSize(width: current.x - start.x, height: current.y - start.y)
-
-        if dragMode == .undecided {
-            let absX = abs(total.width), absY = abs(total.height)
-            guard max(absX, absY) >= Self.swipeDecideThreshold else { return }
-            // 横向主导且图片水平方向没有可滚动余量 → 滑动切图;其余一律平移
-            if absX > absY && !isHorizontallyOverflowing {
-                dragMode = .swipe
-                // 判定前那几像素也算上,否则图片会一直落在光标后面。
-                lastDragPoint = start
-            } else {
-                dragMode = .pan
-            }
-        }
-        switch dragMode {
-        case .swipe:
-            let dx = current.x - last.x
-            if onSwipePan?(dx, false) != true {
-                swipeTotalDX += dx
-            }
-        case .pan:
-            onPan?(CGSize(width: current.x - last.x, height: current.y - last.y))
-        case .undecided:
-            break
-        }
-        lastDragPoint = current
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        defer { resetDragState() }
-        guard dragMode == .swipe else { return }
-        if onSwipePan?(0, true) == true { return }
-        guard abs(swipeTotalDX) >= Self.swipeCommitThreshold else { return }
-        // 跟相册一样:往右拖 = 上一张,往左拖 = 下一张。与触控板横滑同一方向。
-        onSwipe?(swipeTotalDX > 0 ? -1 : 1)
-    }
-
-    private func resetDragState() {
-        dragMode = .undecided
-        mouseDownPoint = nil
-        lastDragPoint = nil
-        swipeTotalDX = 0
-    }
-
-    /// 图片显示宽度是否超过视口宽度(超出时横向拖动属于平移语义)
-    private var isHorizontallyOverflowing: Bool {
-        guard let clip = enclosingScrollView?.contentView else { return false }
-        return frame.width > clip.bounds.width + 0.5
     }
 }

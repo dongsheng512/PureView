@@ -34,6 +34,9 @@ struct MainContentView: View {
     @State private var slideshowHUDVisible = false
     @State private var isHoveringSlideshowHUD = false
     @State private var slideshowHoverGeneration = 0
+    @State private var slideshowToastSymbol: String?
+    @State private var slideshowToastGeneration = 0
+    @State private var kenBurnsScale: CGFloat = 1.0
     @State private var lastHoverLocation: CGPoint?
     /// 纯净模式期间常驻的本地 mouseMoved 监视器,喂两处边缘热区(右上角退出按钮 / 底边控制条)
     @State private var hoverMonitor: Any?
@@ -42,6 +45,9 @@ struct MainContentView: View {
     @State private var exitAffordanceVisible = false
     @State private var exitAffordanceInZone = false
     @State private var exitFadeGeneration = 0
+    /// 纯净模式进入时的顶部轻提示胶囊(1.8s 后自动淡出)
+    @State private var immersiveHintVisible = false
+    @State private var immersiveHintGeneration = 0
     /// 窗口是否处于全屏。全屏时收起自绘顶栏/侧栏/状态栏,图铺满屏幕;
     /// 红绿灯在系统那条自动隐藏的栏里。
     @State private var isFullScreen = false
@@ -87,6 +93,12 @@ struct MainContentView: View {
             // 右上角热区彻底失效,而那个位置平时又是空的,用户会以为出口没了。
             updateHoverMonitor(active: store.isImmersive)
         }
+        .onDisappear {
+            WindowMoveControl.setBackgroundMove(true)
+            // 必须挂在外层视图而非 normalLayer:切进纯净模式时 normalLayer 会消失,
+            // 挂在那里会立刻拆掉刚注册的 hoverMonitor,且纯净模式下关窗反而收不到回调。
+            updateHoverMonitor(active: false)
+        }
         .onChange(of: slideshowInterval) { _, value in
             store.slideshowInterval = value
             store.slideshowIntervalChanged()
@@ -94,7 +106,11 @@ struct MainContentView: View {
         .onChange(of: store.isImmersive) { _, immersive in
             // 纯净模式全程挂本地事件监视器:右上角退出按钮的热区靠它
             updateHoverMonitor(active: immersive)
-            if !immersive {
+            if immersive {
+                showImmersiveHint()
+            } else {
+                immersiveHintGeneration += 1
+                immersiveHintVisible = false
                 withAnimation(.easeInOut(duration: 0.2)) { slideshowHUDVisible = false }
             }
             // 全屏里手动退/进纯净后,联动标记必须失效:否则系统标题栏被过期标记
@@ -106,9 +122,34 @@ struct MainContentView: View {
         .onChange(of: store.isSlideshowActive) { _, active in
             if active {
                 showSlideshowHUD()
+                restartKenBurnsIfNeeded()
             } else {
                 slideshowHoverGeneration += 1
+                slideshowToastGeneration += 1
+                slideshowToastSymbol = nil
+                withAnimation(.easeOut(duration: 0.2)) { kenBurnsScale = 1.0 }
                 withAnimation(.easeInOut(duration: 0.2)) { slideshowHUDVisible = false }
+            }
+        }
+        .onChange(of: store.isSlideshowPaused) { _, paused in
+            guard store.isSlideshowActive else { return }
+            showSlideshowToast(paused ? "pause.fill" : "play.fill")
+            showSlideshowHUD()
+            if paused {
+                // 暂停时停在当前微缩放，不突兀弹回
+                withAnimation(.easeOut(duration: 0.15)) { kenBurnsScale = kenBurnsScale }
+            } else {
+                restartKenBurnsIfNeeded()
+            }
+        }
+        .onChange(of: store.currentImage?.id) { _, _ in
+            restartKenBurnsIfNeeded()
+        }
+        .onChange(of: store.slideshowKenBurns) { _, enabled in
+            if enabled {
+                restartKenBurnsIfNeeded()
+            } else {
+                withAnimation(.easeOut(duration: 0.25)) { kenBurnsScale = 1.0 }
             }
         }
         // 全屏 ⇄ 纯净模式单向绑定:进全屏自动进纯净(复用 toggleImmersive 的
@@ -194,6 +235,23 @@ struct MainContentView: View {
                     .onAppear { showExitAffordance(fadeAfter: 3) }
             }
         }
+        .overlay(alignment: .top) {
+            if store.isImmersive, immersiveHintVisible {
+                Text("按 Esc 或 F 退出纯净模式")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background {
+                        AdaptiveGlassSurface(shape: Capsule(), legacyStroke: AnyShapeStyle(.separator), shadowOpacity: 0.14)
+                    }
+                    .environment(\.colorScheme, canvasScheme)
+                    .padding(.top, 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: immersiveHintVisible)
         .onExitCommand {
             if store.isImmersive, isFullScreen, fullscreenLinkedImmersive {
                 // 全屏引发的纯净:F/Esc 一把退到底,状态还原由退出全屏的通知链完成
@@ -209,10 +267,11 @@ struct MainContentView: View {
         ZStack {
             ImageViewCanvas(
                 file: store.currentImage,
+                files: store.visibleImages,
                 neighbors: store.neighbors,
                 background: canvasBackground,
                 openZoomMode: openZoomMode,
-                transition: imageTransition,
+                transition: store.isSlideshowActive ? .fade : imageTransition,
                 zoomRequest: store.zoomRequest,
                 rotationCount: store.rotationCount,
                 stepDirection: store.lastStepDirection,
@@ -220,28 +279,58 @@ struct MainContentView: View {
                 onScaleChange: { store.displayScale = $0 },
                 onImageInfo: { store.displayInfo = $0 },
                 onRotationChange: { store.isDisplayRotated = $0 },
+                onSelect: { store.selectImage($0) },
                 onStep: { delta in
                     store.step(delta)
                     return store.neighbors
                 }
             )
+            .scaleEffect(kenBurnsScale)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+
+            if let symbol = slideshowToastSymbol {
+                Image(systemName: symbol)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 58, height: 58)
+                    .background {
+                        AdaptiveGlassSurface(
+                            shape: Circle(),
+                            legacyStroke: AnyShapeStyle(.separator),
+                            shadowOpacity: 0.16
+                        )
+                    }
+                    .environment(\.colorScheme, canvasScheme)
+                    .allowsHitTesting(false)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
         }
+        .animation(.easeInOut(duration: 0.18), value: slideshowToastSymbol)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .bottom) {
             if slideshowHUDVisible {
                 SlideshowHUD(
                     playing: store.isSlideshowActive && !store.isSlideshowPaused,
                     canPlay: store.visibleImages.count >= 2 && store.currentImage != nil,
-                    positionText: "\(max(store.visibleIndex, 0) + 1) / \(store.visibleImages.count)",
+                    fileName: store.currentImage?.name ?? "",
+                    currentIndex: max(store.visibleIndex, 0),
+                    totalCount: store.visibleImages.count,
                     intervalLabel: store.slideshowInterval.label,
+                    intervalSeconds: Double(store.slideshowInterval.seconds),
+                    tickStart: store.slideshowTickStart,
+                    tickToken: store.slideshowTickToken,
+                    shuffle: store.slideshowShuffle,
+                    loop: store.slideshowLoop,
+                    kenBurns: store.slideshowKenBurns,
                     onPrev: { store.step(-1) },
                     onToggle: { store.toggleSlideshow() },
                     onNext: { store.step(1) },
+                    onJump: { store.jumpToVisibleIndex($0) },
                     onCycleInterval: { slideshowInterval = store.slideshowInterval.next },
-                    // 控制条只在幻灯片会话里存在,所以 X 的含义很确定 = 结束会话
-                    // (并随之退出纯净模式)。原先那个 `: store.toggleImmersive()` 分支是给
-                    // "未开播也在底边浮现"的用法兜底的,那条路径已经取消,分支也就没了意义。
+                    onToggleShuffle: { store.slideshowShuffle.toggle() },
+                    onToggleLoop: { store.slideshowLoop.toggle() },
+                    onToggleKenBurns: { store.slideshowKenBurns.toggle() },
                     onExit: { store.endSlideshow() }
                 )
                 // 与出口按钮同一处理:控制条的材质跟画布,不跟系统外观,
@@ -274,6 +363,42 @@ struct MainContentView: View {
             try? await Task.sleep(for: .seconds(2.5))
             guard gen == slideshowHoverGeneration, !isHoveringSlideshowHUD else { return }
             withAnimation(.easeInOut(duration: 0.2)) { slideshowHUDVisible = false }
+            // HUD 淡出后且仍在自动播放时隐藏鼠标光标，移动鼠标自动恢复
+            if store.isSlideshowActive, !store.isSlideshowPaused {
+                NSCursor.setHiddenUntilMouseMoves(true)
+            }
+        }
+    }
+
+    private func showSlideshowToast(_ symbol: String) {
+        slideshowToastGeneration += 1
+        let gen = slideshowToastGeneration
+        withAnimation(.easeInOut(duration: 0.16)) { slideshowToastSymbol = symbol }
+        Task {
+            try? await Task.sleep(for: .milliseconds(850))
+            guard gen == slideshowToastGeneration else { return }
+            withAnimation(.easeOut(duration: 0.24)) { slideshowToastSymbol = nil }
+        }
+    }
+
+    private func restartKenBurnsIfNeeded() {
+        guard store.isSlideshowActive, store.slideshowKenBurns, !store.isSlideshowPaused else {
+            if !store.isSlideshowActive || !store.slideshowKenBurns {
+                withAnimation(.easeOut(duration: 0.2)) { kenBurnsScale = 1.0 }
+            }
+            return
+        }
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            kenBurnsScale = 1.0
+        }
+        let duration = max(1.0, Double(store.slideshowInterval.seconds))
+        DispatchQueue.main.async {
+            guard store.isSlideshowActive, store.slideshowKenBurns, !store.isSlideshowPaused else { return }
+            withAnimation(.linear(duration: duration)) {
+                kenBurnsScale = 1.06
+            }
         }
     }
 
@@ -428,6 +553,17 @@ struct MainContentView: View {
         }
     }
 
+    private func showImmersiveHint() {
+        immersiveHintGeneration += 1
+        let gen = immersiveHintGeneration
+        withAnimation(.easeInOut(duration: 0.2)) { immersiveHintVisible = true }
+        Task {
+            try? await Task.sleep(for: .seconds(1.8))
+            guard gen == immersiveHintGeneration else { return }
+            withAnimation(.easeInOut(duration: 0.3)) { immersiveHintVisible = false }
+        }
+    }
+
     private var normalLayer: some View {
         ZStack(alignment: .top) {
             HStack(spacing: 0) {
@@ -486,13 +622,6 @@ struct MainContentView: View {
         // 只绑 sidebarVisible,分隔线拖拽宽度的即时性不受影响
         .animation(.easeInOut(duration: 0.22), value: store.sidebarVisible)
         .ignoresSafeArea(edges: .top)
-        .onDisappear {
-            WindowMoveControl.setBackgroundMove(true)
-            // 纯净模式下监视器是常驻的,视图消失时必须摘掉:否则它继续收事件、继续驱动一个
-            // 已经不在屏上的视图,而闭包还强持有本视图(连带 `store`,即整个 FolderStore)。
-            // 原先只有 `onChange(of: isImmersive)` 一条摘除路径 —— 关窗时那个 onChange 不会来。
-            updateHoverMonitor(active: false)
-        }
     }
 
     // MARK: - 拼版打印
@@ -612,6 +741,7 @@ struct MainContentView: View {
                 } else {
                 ImageViewCanvas(
                     file: store.currentImage,
+                    files: store.visibleImages,
                     neighbors: store.neighbors,
                     background: canvasBackground,
                     openZoomMode: openZoomMode,
@@ -623,16 +753,21 @@ struct MainContentView: View {
                     onScaleChange: { store.displayScale = $0 },
                     onImageInfo: { store.displayInfo = $0 },
                     onRotationChange: { store.isDisplayRotated = $0 },
+                    onSelect: { store.selectImage($0) },
                     onStep: { delta in
                         store.step(delta)
                         return store.neighbors
-                    },
+                    }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
                 .contextMenu {
                     if let file = store.currentImage {
                         Button { store.copyImageToPasteboard(file.id) } label: {
                             Label("复制图片", systemImage: "doc.on.doc")
+                        }
+                        ShareLink(item: file.url) {
+                            Label("共享…", systemImage: "square.and.arrow.up")
                         }
                         Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: {
                             Label("在 Finder 中显示", systemImage: "folder")
@@ -836,15 +971,24 @@ struct MainContentView: View {
                     }
                 }
 
-                // 旋转只是显示态,切图即丢、不写回文件;这里如实标注,避免用户误以为已保存
+                // 旋转只是显示态,切图即丢、不写回文件;做成轻菜单支持一键复位或进编辑保存
                 if store.isDisplayRotated {
                     statusBarDivider
-                    HStack(spacing: 3) {
-                        Image(systemName: "rotate.right")
-                            .font(.system(size: 9))
-                        Text("已旋转(未保存)")
+                    Menu {
+                        Button("复位旋转") { store.resetDisplayRotation() }
+                        Button("进入编辑以保存…") { store.beginEdit(tool: .crop) }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "rotate.right")
+                                .font(.system(size: 9))
+                            Text("已旋转(未保存)")
+                        }
+                        .foregroundStyle(.secondary)
                     }
-                    .foregroundStyle(.secondary)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("点击复位旋转，或进入编辑导出保存")
                 }
 
                 statusBarDivider
@@ -906,7 +1050,13 @@ struct MainContentView: View {
 
     private var zoomMenu: some View {
         Button {
-            showZoomMenu.toggle()
+            if NSEvent.modifierFlags.contains(.option), !store.isEditing {
+                // ⌥+点击一键在「适配窗口 / 100% 实际大小」间切换
+                let isNearActual = abs(store.displayScale - 1.0) < 0.02
+                store.requestZoom(isNearActual ? .fit : .actualSize)
+            } else {
+                showZoomMenu.toggle()
+            }
         } label: {
             Text("\(Int(((store.isEditing ? store.editDisplayScale : store.displayScale) * 100).rounded()))%")
                 .font(.caption)
@@ -915,6 +1065,7 @@ struct MainContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(store.currentImage == nil || (store.isEditing && store.editTool == .crop))
+        .help("点击选择缩放比例（按住 ⌥ 点击快速切换适配 / 100%）")
     }
 
     /// 窗口内下拉面板(替代 NSMenu 弹出,不超出窗口边界)
@@ -1087,225 +1238,3 @@ struct MainContentView: View {
     }
 }
 
-/// 幻灯片控制条:底部居中胶囊条,播放/暂停、前后切换、间隔循环、结束会话。
-/// **只在幻灯片会话里存在** —— 会话开始浮现一次、静止 2.5 秒淡出、鼠标移到窗口底边可再叫出来;
-/// 不播放时纯净模式里不该有任何浮层(此时退出走右上角按钮 / Esc / F / 菜单栏)。
-private struct SlideshowHUD: View {
-    let playing: Bool
-    var canPlay: Bool = true
-    let positionText: String
-    let intervalLabel: String
-    let onPrev: () -> Void
-    let onToggle: () -> Void
-    let onNext: () -> Void
-    let onCycleInterval: () -> Void
-    let onExit: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Text(positionText)
-                .font(.caption)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-            Divider().frame(height: 16)
-            hudButton("chevron.left", action: onPrev)
-            hudButton(playing ? "pause.fill" : "play.fill", action: onToggle, prominent: true, disabled: !canPlay)
-            hudButton("chevron.right", action: onNext)
-            Divider().frame(height: 16)
-            Button(action: onCycleInterval) {
-                Text(intervalLabel)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 34)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("播放间隔(点击切换)")
-            Divider().frame(height: 16)
-            hudButton("xmark", action: onExit)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background {
-            // 幻灯片 HUD:26 起用系统玻璃(原来就没有投影,所以传 0)
-            AdaptiveGlassSurface(
-                shape: Capsule(),
-                legacyStroke: AnyShapeStyle(.separator),
-                shadowOpacity: 0
-            )
-        }
-    }
-
-    private func hudButton(_ symbol: String, action: @escaping () -> Void, prominent: Bool = false, disabled: Bool = false) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: prominent ? 14 : 12, weight: .medium))
-                .foregroundStyle(prominent ? Color.primary : Color.secondary)
-                .frame(width: 26, height: 24)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .opacity(disabled ? 0.35 : 1)
-    }
-}
-
-/// 窗口 chrome：移除原生标题栏，仅保留 PureHeader 单层
-private struct WindowChrome: NSViewRepresentable {
-    let immersive: Bool
-    var fullscreenLinkedImmersive = false
-    var allowBackgroundMove = true
-    func makeNSView(context: Context) -> NSView { ChromeView() }
-    func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? ChromeView)?.immersive = immersive
-        (nsView as? ChromeView)?.fullscreenLinkedImmersive = fullscreenLinkedImmersive
-        (nsView as? ChromeView)?.allowBackgroundMove = allowBackgroundMove
-        (nsView as? ChromeView)?.apply()
-    }
-}
-private final class ChromeView: NSView {
-    var immersive = false
-    var fullscreenLinkedImmersive = false
-    var allowBackgroundMove = true
-    /// 应用名(全屏那条系统栏要显示它)。取自 Info.plist,避免与 `build.sh` 里的
-    /// `CFBundleName` 各写一份;取不到时退回 "PureView"。
-    private static let appName: String = {
-        guard let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String,
-              !name.isEmpty else { return "PureView" }
-        return name
-    }()
-    /// 见过的标题栏容器(全屏 / 非全屏要来回切显隐),以及它被压成 0 高之前的原始高度
-    private var titlebarViews: [NSView] = []
-    private var titlebarOriginalHeight: CGFloat = 0
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        apply()
-        DispatchQueue.main.async { [weak self] in self?.stripTitlebar() }
-        observeWindowState()
-    }
-    override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); apply() }
-    func apply() { stripTitlebar() }
-
-    /// 进出全屏要重跑一遍:全屏下标题栏是"还给系统"的,与平时正好相反。
-    /// 光靠 updateNSView 不行 —— SwiftUI 不会因为窗口进了全屏就重算这个视图。
-    /// 会改变"标题栏该不该露出来"的所有窗口事件。
-    /// 进出全屏是主因;**换显示器 / 换缩放同样会重排 theme frame** —— AppKit 会把标题栏容器
-    /// 的高度还原,不重跑一次,原生标题栏就会重新冒出来(红绿灯出现在窗口左上角)。
-    private static let chromeNotifications: [Notification.Name] = [
-        NSWindow.didEnterFullScreenNotification,
-        NSWindow.didExitFullScreenNotification,
-        NSWindow.didChangeScreenNotification,
-        NSWindow.didChangeBackingPropertiesNotification,
-    ]
-
-    private func observeWindowState() {
-        let center = NotificationCenter.default
-        for name in Self.chromeNotifications {
-            center.removeObserver(self, name: name, object: nil)
-        }
-        guard let window else { return }
-        for name in Self.chromeNotifications {
-            center.addObserver(self, selector: #selector(windowStateChanged), name: name, object: window)
-        }
-    }
-
-    @objc private func windowStateChanged() {
-        stripTitlebar()
-        // 换屏那次重排往往紧跟在通知之后,同步这一次会被它覆盖 —— 下一轮 run loop 再补一次
-        DispatchQueue.main.async { [weak self] in self?.stripTitlebar() }
-    }
-
-    deinit { NotificationCenter.default.removeObserver(self) }
-
-    /// 窗口 chrome 的唯一落点。**每次 SwiftUI 重渲染都会跑到这里**(经 `WindowChrome.updateNSView`),
-    /// 所以下面**每一处赋值都只在值真的会变时才写** —— 无条件写 `title` / 标题栏容器的
-    /// `frame.size.height` / 图层遮罩,每次都会强制 theme frame 重新布局与重新合成,
-    /// 在 1x(1080p)面板上会被看成画面轻微闪动。
-    /// (同一类问题 P1-3 在画布那边已经修过:`updateNSView` 不再无条件重绘整块画布。)
-    private func stripTitlebar() {
-        WindowMoveControl.setBackgroundMove(allowBackgroundMove)
-        guard let window else { return }
-        if !window.styleMask.contains(.fullSizeContentView) {
-            window.styleMask.insert(.fullSizeContentView)
-        }
-        // 记住窗口位置与尺寸,下次启动恢复到上次的位置
-        if window.frameAutosaveName.isEmpty {
-            window.setFrameAutosaveName("MainWindow")
-        }
-        // 全屏时把标题栏还给系统:macOS 会把它抽成屏幕顶部那条自动隐藏的栏,
-        // 显示"应用名 + 红绿灯"。此前这里一刀切地藏掉标题栏,全屏时那条栏就是空的,
-        // 红绿灯只能留在应用自己的顶栏里 —— 看起来就像"全屏了,窗口还是原来那个"。
-        let fullScreen = window.styleMask.contains(.fullScreen)
-        // 纯净模式(无论是否全屏)都不要系统那条栏;非纯净的全屏要看得见。
-        // 全屏引发的纯净由 fullscreenLinkedImmersive 标记:进全屏时自动带入,
-        // 此时鼠标扫顶部也没有系统栏 —— 出口统一收敛到右上角热区/Esc。
-        let showSystemTitlebar = fullScreen && !immersive && !fullscreenLinkedImmersive
-        // 全屏那条栏本身要看得见,所以别让它透明;平时仍然透明(应用顶栏自己画背景)
-        if window.titlebarAppearsTransparent != !showSystemTitlebar {
-            window.titlebarAppearsTransparent = !showSystemTitlebar
-        }
-        let visibility: NSWindow.TitleVisibility = showSystemTitlebar ? .visible : .hidden
-        if window.titleVisibility != visibility { window.titleVisibility = visibility }
-        // 用 Info.plist 的 CFBundleName,别在这里再硬写一遍应用名(改一次要记得改两处)
-        let title = showSystemTitlebar ? Self.appName : ""
-        if window.title != title { window.title = title }
-        if window.backgroundColor != .clear { window.backgroundColor = .clear }
-        if window.isOpaque { window.isOpaque = false }
-        // 全屏/纯净无圆角;14–15 自己裁 10pt;26+ 交给系统窗口裁,避免和本机半径叠出白边
-        let radius: CGFloat = (immersive || fullScreen) ? 0 : WindowChromeMetrics.cornerRadius
-        applyChrome(to: window.contentView, radius: radius)
-        applyChrome(to: window.contentView?.superview, radius: radius)
-        // 原生标题栏藏掉,避免挡自定义顶栏点击;红绿灯由 PureHeader 里的 NativeTrafficLights 接管。
-        // 纯净模式连按钮一起藏(全屏引发的纯净也算)。
-        for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            guard let button = window.standardWindowButton(b) else { continue }
-            let shouldHide = immersive || fullscreenLinkedImmersive
-            if button.isHidden != shouldHide { button.isHidden = shouldHide }
-        }
-        for view in titlebarViews(in: window) {
-            if showSystemTitlebar {
-                if view.isHidden { view.isHidden = false }
-                // 之前被压成 0 高,这里要还原,否则那条栏是一条零高度的缝
-                if titlebarOriginalHeight > 1, view.frame.size.height < 1 {
-                    view.frame.size.height = titlebarOriginalHeight
-                }
-            } else {
-                if titlebarOriginalHeight < 1, view.frame.size.height > 1 {
-                    titlebarOriginalHeight = view.frame.size.height
-                }
-                if !view.isHidden { view.isHidden = true }
-                if view.frame.size.height != 0 { view.frame.size.height = 0 }
-            }
-        }
-    }
-
-    /// 圆角 / 遮罩只在真的需要改时才动 —— 给图层赋值本身就会触发一次重新合成。
-    /// 圆角为 0 时(`immersive` 或全屏)没必要开 `masksToBounds`:既是纯开销,
-    /// 又会把整窗内容拖进离屏通道,在 1x 面板上容易出现合成层面的轻微闪动。
-    private func applyChrome(to view: NSView?, radius: CGFloat) {
-        guard let view else { return }
-        if !view.wantsLayer { view.wantsLayer = true }
-        if view.layer?.cornerRadius != radius { view.layer?.cornerRadius = radius }
-        let curve: CALayerCornerCurve = radius > 0 ? .continuous : .circular
-        if view.layer?.cornerCurve != curve { view.layer?.cornerCurve = curve }
-        let shouldMask = radius > 0
-        if view.layer?.masksToBounds != shouldMask { view.layer?.masksToBounds = shouldMask }
-    }
-
-    /// 标题栏容器:用记住的那些(AppKit 进出全屏时可能把它挪进另一个窗口,
-    /// 那时按类型名在 theme frame 的子树里就找不到了),再并上当前扫到的。
-    /// 这里刻意不清理"看起来已经死掉"的引用 —— 过渡中途 superview 可能短暂为 nil,
-    /// 一旦清掉就再也无法把它露出来;一个窗口最多也就这么一两个容器,留着无妨。
-    private func titlebarViews(in window: NSWindow) -> [NSView] {
-        if let theme = window.contentView?.superview {
-            for sub in theme.subviews
-            where String(describing: type(of: sub)).contains("Titlebar")
-                && !titlebarViews.contains(where: { $0 === sub }) {
-                titlebarViews.append(sub)
-            }
-        }
-        return titlebarViews
-    }
-}

@@ -25,9 +25,10 @@ enum AnnotationRenderer {
         var blurCache: [CGFloat: CGImage] = [:]
         for annotation in annotations {
             switch annotation.kind {
-            case let .text(anchor, content, sizeFraction, color):
+            case let .text(anchor, content, sizeFraction, color, hasBackground):
                 drawText(content, sizeFraction: MarkPalette.clampTextFraction(sizeFraction),
-                         color: color, topLeft: anchor, in: ctx, canvasSize: canvasSize)
+                         color: color, topLeft: anchor, hasBackground: hasBackground,
+                         in: ctx, canvasSize: canvasSize)
             case let .stroke(points, widthLevel, color, style):
                 let width = MarkPalette.fraction(MarkPalette.widthTable(for: style), level: widthLevel) * canvasSize.width
                 guard let path = strokePath(points, canvasSize: canvasSize) else { continue }
@@ -44,19 +45,11 @@ enum AnnotationRenderer {
             case let .mosaic(points, widthLevel, effect):
                 let widthFraction = MarkPalette.fraction(MarkPalette.mosaicWidths, level: widthLevel)
                 guard let path = strokePath(points, canvasSize: canvasSize) else { continue }
-                let effectImage: CGImage?
-                switch effect {
-                case .pixelate:
-                    let block = MarkPalette.fraction(MarkPalette.pixelateBlocks, level: widthLevel)
-                    effectImage = pixelateCache[block]
-                        ?? base.flatMap { pixelated($0, blockFraction: block, cache: cacheEffects) }
-                    pixelateCache[block] = effectImage
-                case .blur:
-                    let radius = MarkPalette.fraction(MarkPalette.blurRadii, level: widthLevel)
-                    effectImage = blurCache[radius]
-                        ?? base.flatMap { gaussianBlurred($0, radiusFraction: radius, cache: cacheEffects) }
-                    blurCache[radius] = effectImage
-                }
+                let effectImage = resolveEffectImage(
+                    effect: effect, widthLevel: widthLevel, base: base,
+                    cacheEffects: cacheEffects,
+                    pixelateCache: &pixelateCache, blurCache: &blurCache
+                )
                 guard let effectImage else { continue }
                 ctx.saveGState()
                 ctx.addPath(path)
@@ -66,31 +59,96 @@ enum AnnotationRenderer {
                 // 把折线换成"描边区域",只在这一笔的范围内显示效果底图
                 ctx.replacePathWithStrokedPath()
                 ctx.clip()
-                // 效果底图是常规方向图片,局部翻转回来再铺
+                drawEffectImage(effectImage, in: ctx, canvasSize: canvasSize)
+                ctx.restoreGState()
+            case let .mosaicRect(from, to, widthLevel, effect):
+                let norm = MarkupGeometry.standardizedRect(from: from, to: to)
+                let pixelRect = CGRect(
+                    x: norm.minX * canvasSize.width,
+                    y: norm.minY * canvasSize.height,
+                    width: norm.width * canvasSize.width,
+                    height: norm.height * canvasSize.height
+                )
+                guard pixelRect.width > 1, pixelRect.height > 1 else { continue }
+                let effectImage = resolveEffectImage(
+                    effect: effect, widthLevel: widthLevel, base: base,
+                    cacheEffects: cacheEffects,
+                    pixelateCache: &pixelateCache, blurCache: &blurCache
+                )
+                guard let effectImage else { continue }
                 ctx.saveGState()
-                ctx.translateBy(x: 0, y: canvasSize.height)
-                ctx.scaleBy(x: 1, y: -1)
-                ctx.draw(effectImage, in: CGRect(origin: .zero, size: canvasSize))
+                ctx.clip(to: pixelRect)
+                drawEffectImage(effectImage, in: ctx, canvasSize: canvasSize)
                 ctx.restoreGState()
-                ctx.restoreGState()
-            case let .shape(kind, from, to, widthLevel, color):
+            case let .step(anchor, number, sizeFraction, color):
+                drawStep(anchor: anchor, number: number, sizeFraction: sizeFraction,
+                         color: color, in: ctx, canvasSize: canvasSize)
+            case let .shape(kind, from, to, widthLevel, color, filled):
                 drawShape(kind, from: from, to: to,
                           widthFraction: MarkPalette.fraction(MarkPalette.strokeWidths, level: widthLevel),
-                          color: color, in: ctx, canvasSize: canvasSize)
+                          color: color, filled: filled, in: ctx, canvasSize: canvasSize)
             }
         }
         ctx.restoreGState()
     }
 
-    /// 形状:只描边;箭头为线段 + 实心三角头。显示坐标(y 向下)上下文。
+    /// 步骤序号气泡(① ② ③):实心圆 + 白色描边环 + 居中粗体数字(浅色底自动切黑字)。
+    private static func drawStep(anchor: CGPoint, number: Int, sizeFraction: CGFloat,
+                                 color: MarkupColor, in ctx: CGContext, canvasSize: CGSize) {
+        let diameter = max(20, sizeFraction * canvasSize.width)
+        let radius = diameter / 2
+        let center = CGPoint(x: anchor.x * canvasSize.width, y: anchor.y * canvasSize.height)
+        let circleRect = CGRect(x: center.x - radius, y: center.y - radius, width: diameter, height: diameter)
+
+        ctx.saveGState()
+        // 轻微阴影让气泡从复杂截图里浮出来
+        ctx.setShadow(offset: CGSize(width: 0, height: max(1, diameter * 0.04)),
+                      blur: max(2, diameter * 0.12),
+                      color: NSColor.black.withAlphaComponent(0.30).cgColor)
+        ctx.setFillColor(MarkPalette.nsColor(color).cgColor)
+        ctx.fillEllipse(in: circleRect)
+        ctx.restoreGState()
+
+        // 外白环
+        ctx.saveGState()
+        let ringWidth = max(1.5, diameter * 0.075)
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.95).cgColor)
+        ctx.setLineWidth(ringWidth)
+        ctx.strokeEllipse(in: circleRect.insetBy(dx: ringWidth / 2, dy: ringWidth / 2))
+        ctx.restoreGState()
+
+        // 居中数字(多位数略缩字号避免撑出圆外)
+        let label = "\(number)"
+        let fontRatio: CGFloat = label.count >= 2 ? 0.46 : 0.56
+        let font = NSFont.systemFont(ofSize: diameter * fontRatio, weight: .bold)
+        let textColor: NSColor = MarkPalette.isLight(color) ? .black : .white
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: textColor,
+        ]
+        let attributed = NSAttributedString(string: label, attributes: attrs)
+        let textSize = attributed.size()
+        let textOrigin = CGPoint(
+            x: center.x - textSize.width / 2,
+            y: center.y - textSize.height / 2
+        )
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        attributed.draw(at: textOrigin)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// 形状:支持描边与可选半透明填充(矩形/椭圆);箭头为线段 + 实心三角头。显示坐标(y 向下)上下文。
     private static func drawShape(_ kind: ShapeKind, from: CGPoint, to: CGPoint,
                                   widthFraction: CGFloat, color: MarkupColor,
+                                  filled: Bool,
                                   in ctx: CGContext, canvasSize: CGSize) {
         let width = max(1, widthFraction * canvasSize.width)
-        let color = MarkPalette.nsColor(color).cgColor
+        let nsColor = MarkPalette.nsColor(color)
+        let cgColor = nsColor.cgColor
         ctx.saveGState()
-        ctx.setStrokeColor(color)
-        ctx.setFillColor(color)
+        ctx.setStrokeColor(cgColor)
+        ctx.setFillColor(cgColor)
         ctx.setLineWidth(width)
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
@@ -105,9 +163,18 @@ enum AnnotationRenderer {
                                    width: norm.width * canvasSize.width,
                                    height: norm.height * canvasSize.height)
             if kind == .rect {
+                if filled {
+                    ctx.setFillColor(nsColor.withAlphaComponent(0.24).cgColor)
+                    ctx.fill(pixelRect)
+                }
                 ctx.stroke(pixelRect)
             } else {
                 let ellipse = CGPath(ellipseIn: pixelRect, transform: nil)
+                if filled {
+                    ctx.setFillColor(nsColor.withAlphaComponent(0.24).cgColor)
+                    ctx.addPath(ellipse)
+                    ctx.fillPath()
+                }
                 ctx.addPath(ellipse)
                 ctx.strokePath()
             }
@@ -170,7 +237,8 @@ enum AnnotationRenderer {
     /// `topLeft` 是**归一化**左上角(0...1),不要传入像素坐标。
     /// 上下文必须是已被外层翻转过的;文字在局部再翻回,保证字形直立的同一份代码两端通用。
     static func drawText(_ content: String, sizeFraction: CGFloat, color: MarkupColor,
-                         topLeft: CGPoint, in ctx: CGContext, canvasSize: CGSize) {
+                         topLeft: CGPoint, hasBackground: Bool = false,
+                         in ctx: CGContext, canvasSize: CGSize) {
         let fontSize = sizeFraction * canvasSize.width
         guard fontSize > 0 else { return }
         let font = makeFont(size: fontSize)
@@ -179,6 +247,29 @@ enum AnnotationRenderer {
         let ascent = CTFontGetAscent(font)
         let x = topLeft.x * canvasSize.width
         let yTop = topLeft.y * canvasSize.height
+        if hasBackground {
+            let blockSize = textSize(content: content, sizeFraction: sizeFraction, canvasWidth: canvasSize.width)
+            if blockSize.width > 0, blockSize.height > 0 {
+                let padX = max(4, fontSize * 0.32)
+                let padY = max(2, fontSize * 0.16)
+                let bgRect = CGRect(
+                    x: x - padX,
+                    y: yTop - padY,
+                    width: blockSize.width + padX * 2,
+                    height: blockSize.height + padY * 2
+                )
+                let radius = max(3, fontSize * 0.24)
+                let luminance = 0.299 * color.redComponent + 0.587 * color.greenComponent + 0.114 * color.blueComponent
+                let bgColor = luminance < 0.42
+                    ? NSColor(white: 1.0, alpha: 0.82).cgColor
+                    : NSColor(white: 0.08, alpha: 0.68).cgColor
+                ctx.saveGState()
+                ctx.setFillColor(bgColor)
+                ctx.addPath(CGPath(roundedRect: bgRect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+                ctx.fillPath()
+                ctx.restoreGState()
+            }
+        }
         for (i, line) in content.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
             let baselineY = yTop + CGFloat(i) * lineHeight + ascent
             ctx.saveGState()
@@ -219,29 +310,19 @@ enum AnnotationRenderer {
         return cache
     }()
 
+    /// 统一走 CoreImage CIPixellate(与高斯模糊共享同一个 Metal CIContext 硬件加速)
     static func pixelated(_ base: CGImage, blockFraction: CGFloat, cache: Bool = true) -> CGImage? {
         let cacheKey = "p-\(ObjectIdentifier(base))-\(blockFraction)" as NSString
         if cache, let entry = effectCache.object(forKey: cacheKey), entry.base === base { return entry.image }
-        let blockPx = max(1, blockFraction * CGFloat(base.width))
-        let smallW = max(1, Int((CGFloat(base.width) / blockPx).rounded()))
-        let smallH = max(1, Int((CGFloat(base.height) / blockPx).rounded()))
-        // 降到块级分辨率再最近邻放大,得到硬边像素化;两端都必须 .none,否则块边界发糊
-        guard let smallCtx = CGContext(
-            data: nil, width: smallW, height: smallH, bitsPerComponent: 8, bytesPerRow: 0,
-            space: base.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-        smallCtx.interpolationQuality = .none
-        smallCtx.draw(base, in: CGRect(x: 0, y: 0, width: smallW, height: smallH))
-        guard let small = smallCtx.makeImage(),
-              let bigCtx = CGContext(
-                  data: nil, width: base.width, height: base.height, bitsPerComponent: 8, bytesPerRow: 0,
-                  space: base.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-              ) else { return nil }
-        bigCtx.interpolationQuality = .none
-        bigCtx.draw(small, in: CGRect(x: 0, y: 0, width: base.width, height: base.height))
-        guard let result = bigCtx.makeImage() else { return nil }
+        let blockPx = max(2, blockFraction * CGFloat(base.width))
+        let input = CIImage(cgImage: base)
+        let clamped = input.clampedToExtent()
+        guard let filter = CIFilter(name: "CIPixellate") else { return nil }
+        filter.setValue(clamped, forKey: kCIInputImageKey)
+        filter.setValue(blockPx, forKey: kCIInputScaleKey)
+        filter.setValue(CIVector(x: 0, y: 0), forKey: kCIInputCenterKey)
+        guard let output = filter.outputImage?.cropped(to: input.extent),
+              let result = ciContext.createCGImage(output, from: input.extent) else { return nil }
         if cache {
             effectCache.setObject(EffectCacheEntry(base: base, image: result), forKey: cacheKey,
                                   cost: base.bytesPerRow * base.height * 2)
@@ -271,11 +352,45 @@ enum AnnotationRenderer {
 
     // MARK: 私有
 
+    private static func resolveEffectImage(
+        effect: MosaicEffect,
+        widthLevel: Int,
+        base: CGImage?,
+        cacheEffects: Bool,
+        pixelateCache: inout [CGFloat: CGImage],
+        blurCache: inout [CGFloat: CGImage]
+    ) -> CGImage? {
+        switch effect {
+        case .pixelate:
+            let block = MarkPalette.fraction(MarkPalette.pixelateBlocks, level: widthLevel)
+            if let hit = pixelateCache[block] { return hit }
+            let img = base.flatMap { pixelated($0, blockFraction: block, cache: cacheEffects) }
+            pixelateCache[block] = img
+            return img
+        case .blur:
+            let radius = MarkPalette.fraction(MarkPalette.blurRadii, level: widthLevel)
+            if let hit = blurCache[radius] { return hit }
+            let img = base.flatMap { gaussianBlurred($0, radiusFraction: radius, cache: cacheEffects) }
+            blurCache[radius] = img
+            return img
+        }
+    }
+
+    private static func drawEffectImage(_ effectImage: CGImage, in ctx: CGContext, canvasSize: CGSize) {
+        // 效果底图是常规方向图片,局部翻转回来再铺
+        ctx.saveGState()
+        ctx.translateBy(x: 0, y: canvasSize.height)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(effectImage, in: CGRect(origin: .zero, size: canvasSize))
+        ctx.restoreGState()
+    }
+
     private static func makeFont(size: CGFloat) -> CTFont {
         let nsFont = NSFont.systemFont(ofSize: size, weight: .medium)
         return CTFontCreateWithFontDescriptor(nsFont.fontDescriptor, size, nil)
     }
 
+    /// 中点二次贝塞尔曲线插值:3 点及以上自动平滑过渡,消除快速手写折线棱角。
     private static func strokePath(_ points: [CGPoint], canvasSize: CGSize) -> CGPath? {
         guard !points.isEmpty else { return nil }
         let scaled = points.map { CGPoint(x: $0.x * canvasSize.width, y: $0.y * canvasSize.height) }
@@ -284,9 +399,19 @@ enum AnnotationRenderer {
             // 单点轻点:用一小段重合线段表现圆点
             path.move(to: scaled[0])
             path.addLine(to: CGPoint(x: scaled[0].x + 0.01, y: scaled[0].y))
+        } else if scaled.count == 2 {
+            path.move(to: scaled[0])
+            path.addLine(to: scaled[1])
         } else {
             path.move(to: scaled[0])
-            for p in scaled.dropFirst() { path.addLine(to: p) }
+            for i in 1..<(scaled.count - 1) {
+                let mid = CGPoint(
+                    x: (scaled[i].x + scaled[i + 1].x) / 2,
+                    y: (scaled[i].y + scaled[i + 1].y) / 2
+                )
+                path.addQuadCurve(to: mid, control: scaled[i])
+            }
+            path.addLine(to: scaled[scaled.count - 1])
         }
         return path
     }

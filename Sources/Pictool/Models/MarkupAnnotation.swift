@@ -16,14 +16,18 @@ struct Annotation: Identifiable, Equatable, Sendable {
     }
 
     enum Kind: Equatable, Sendable {
-        /// 锚点为文字块左上角(归一化);sizeFraction = 字号/画布宽(连续,三档 chip 是预设)
-        case text(anchor: CGPoint, content: String, sizeFraction: CGFloat, color: MarkupColor)
+        /// 锚点为文字块左上角(归一化);sizeFraction = 字号/画布宽(连续,三档 chip 是预设);hasBackground = 半透明高对比度底衬
+        case text(anchor: CGPoint, content: String, sizeFraction: CGFloat, color: MarkupColor, hasBackground: Bool = false)
+        /// 步骤序号气泡(① ② ③):anchor 为圆心(归一化);sizeFraction = 直径/画布宽
+        case step(anchor: CGPoint, number: Int, sizeFraction: CGFloat, color: MarkupColor)
         /// 笔迹;style 决定实线或荧光(半透明、更宽)
         case stroke(points: [CGPoint], widthLevel: Int, color: MarkupColor, style: StrokeStyleKind)
         /// 笔迹 = 效果蒙版;effect 决定蒙版下显示像素化还是模糊底图
         case mosaic(points: [CGPoint], widthLevel: Int, effect: MosaicEffect)
-        /// 形状(B2):只描边;rect/ellipse 用 from/to 对角点,line/arrow 用两端点(arrow 指向 to)
-        case shape(kind: ShapeKind, from: CGPoint, to: CGPoint, widthLevel: Int, color: MarkupColor)
+        /// 框选马赛克/模糊区域:一步拉框整齐遮盖隐私信息
+        case mosaicRect(from: CGPoint, to: CGPoint, widthLevel: Int, effect: MosaicEffect)
+        /// 形状(B2):rect/ellipse 用 from/to 对角点(支持半透明填充),line/arrow 用两端点(arrow 指向 to)
+        case shape(kind: ShapeKind, from: CGPoint, to: CGPoint, widthLevel: Int, color: MarkupColor, filled: Bool = false)
     }
 }
 
@@ -43,13 +47,14 @@ enum StrokeStyleKind: String, CaseIterable, Identifiable, Sendable {
 }
 
 enum EditTool: String, CaseIterable, Identifiable, Sendable {
-    // 创建工具在前(裁切/文字/形状/画笔/马赛克),删除类(橡皮)收尾
-    case crop, text, shape, brush, mosaic, eraser
+    // 创建工具在前(裁切/文字/序号/形状/画笔/马赛克),删除类(橡皮)收尾
+    case crop, text, step, shape, brush, mosaic, eraser
     var id: String { rawValue }
     var label: String {
         switch self {
         case .crop: "裁切"
         case .text: "文字"
+        case .step: "序号"
         case .brush: "画笔"
         case .mosaic: "马赛克"
         case .eraser: "橡皮"
@@ -59,11 +64,12 @@ enum EditTool: String, CaseIterable, Identifiable, Sendable {
     var systemImage: String {
         switch self {
         case .crop: "crop"
-        case .text: "character.cursor.ibeam"
+        case .text: "character.textbox"
+        case .step: "1.circle"
         case .brush: "paintbrush.pointed"
-        case .mosaic: "mosaic"
+        case .mosaic: "checkerboard.rectangle"
         case .eraser: "eraser"
-        case .shape: "rectangle.dashed"
+        case .shape: "rectangle"
         }
     }
 }
@@ -108,6 +114,15 @@ enum MosaicEffect: String, CaseIterable, Identifiable, Sendable {
     case blur
     var id: String { rawValue }
     var label: String { self == .pixelate ? "打码" : "模糊" }
+}
+
+/// 马赛克绘制方式:自由涂抹 / 矩形框选
+enum MosaicDrawMode: String, CaseIterable, Identifiable, Sendable {
+    case brush
+    case rect
+    var id: String { rawValue }
+    var label: String { self == .brush ? "涂抹" : "框选" }
+    var systemImage: String { self == .brush ? "scribble.variable" : "rectangle.dashed" }
 }
 
 /// 标记工具共享的调色盘与档位(千分比表)。档位取值越界时夹到合法区间。
@@ -164,6 +179,7 @@ enum MarkPalette {
     }
 
     static let textSizes: [CGFloat] = [0.030, 0.048, 0.070]
+    static let stepSizes: [CGFloat] = [0.032, 0.044, 0.060]
     static let textFractionRange: ClosedRange<CGFloat> = 0.015...0.120
     static let strokeWidths: [CGFloat] = [0.004, 0.008, 0.016]
     /// 荧光笔:更宽,渲染时叠加 45% alpha
@@ -263,10 +279,16 @@ enum MarkupGeometry {
     /// 平移整枚图元并夹回单位矩形;载荷(色/宽/样式)不变。
     static func offset(_ kind: Annotation.Kind, dx: CGFloat, dy: CGFloat) -> Annotation.Kind {
         switch kind {
-        case let .text(anchor, content, sizeFraction, color):
+        case let .text(anchor, content, sizeFraction, color, hasBackground):
             return .text(
                 anchor: moved(anchor: anchor, by: CGSize(width: dx, height: dy)),
-                content: content, sizeFraction: sizeFraction, color: color
+                content: content, sizeFraction: sizeFraction, color: color,
+                hasBackground: hasBackground
+            )
+        case let .step(anchor, number, sizeFraction, color):
+            return .step(
+                anchor: moved(anchor: anchor, by: CGSize(width: dx, height: dy)),
+                number: number, sizeFraction: sizeFraction, color: color
             )
         case let .stroke(points, widthLevel, color, style):
             return .stroke(
@@ -278,10 +300,45 @@ enum MarkupGeometry {
                 points: clampedTranslate(points: points, dx: dx, dy: dy),
                 widthLevel: widthLevel, effect: effect
             )
-        case let .shape(kind, from, to, widthLevel, color):
+        case let .mosaicRect(from, to, widthLevel, effect):
+            let pts = clampedTranslate(points: [from, to], dx: dx, dy: dy)
+            return .mosaicRect(from: pts[0], to: pts[1], widthLevel: widthLevel, effect: effect)
+        case let .shape(kind, from, to, widthLevel, color, filled):
             let pts = clampedTranslate(points: [from, to], dx: dx, dy: dy)
             return .shape(kind: kind, from: pts[0], to: pts[1],
-                          widthLevel: widthLevel, color: color)
+                          widthLevel: widthLevel, color: color, filled: filled)
+        }
+    }
+
+    /// 首次绘制形状按住 ⇧ 时的约束:矩形/椭圆锁 1:1 正形(像素空间);直线/箭头锁 45° 整数倍角度。
+    static func constrainedNewShapeEnd(
+        kind: ShapeKind,
+        from: CGPoint,
+        to: CGPoint,
+        imageSize: CGSize
+    ) -> CGPoint {
+        let w = max(imageSize.width, 1)
+        let h = max(imageSize.height, 1)
+        let dxPx = (to.x - from.x) * w
+        let dyPx = (to.y - from.y) * h
+        switch kind {
+        case .rect, .ellipse:
+            let side = max(abs(dxPx), abs(dyPx))
+            let sx: CGFloat = dxPx >= 0 ? 1 : -1
+            let sy: CGFloat = dyPx >= 0 ? 1 : -1
+            return CGPoint(
+                x: min(max(0, from.x + sx * side / w), 1),
+                y: min(max(0, from.y + sy * side / h), 1)
+            )
+        case .line, .arrow:
+            let len = hypot(dxPx, dyPx)
+            guard len > 0.001 else { return to }
+            let rawAngle = atan2(dyPx, dxPx)
+            let snapped = (rawAngle / (.pi / 4)).rounded() * (.pi / 4)
+            return CGPoint(
+                x: min(max(0, from.x + cos(snapped) * len / w), 1),
+                y: min(max(0, from.y + sin(snapped) * len / h), 1)
+            )
         }
     }
 
@@ -568,6 +625,25 @@ enum MarkupGeometry {
         )
     }
 
+    /// 步骤序号气泡的归一化包围盒(以 anchor 为圆心)。
+    static func stepHitRect(anchor: CGPoint, sizeFraction: CGFloat, imageSize: CGSize) -> CGRect {
+        let w = max(1, imageSize.width)
+        let h = max(1, imageSize.height)
+        let diameterPx = max(20, sizeFraction * w)
+        let normW = diameterPx / w
+        let normH = diameterPx / h
+        return CGRect(x: anchor.x - normW / 2, y: anchor.y - normH / 2, width: normW, height: normH)
+    }
+
+    static func stepHit(point: CGPoint, anchor: CGPoint, sizeFraction: CGFloat, imageSize: CGSize) -> Bool {
+        let w = max(1, imageSize.width)
+        let h = max(1, imageSize.height)
+        let radiusPx = max(12, sizeFraction * w * 0.55)
+        let dx = (point.x - anchor.x) * w
+        let dy = (point.y - anchor.y) * h
+        return (dx * dx + dy * dy) <= radiusPx * radiusPx
+    }
+
     /// 内容相对:图顺时针 90° 后面上的点。
     static func rotateCW90(_ p: CGPoint) -> CGPoint { CGPoint(x: 1 - p.y, y: p.x) }
     static func rotateCCW90(_ p: CGPoint) -> CGPoint { CGPoint(x: p.y, y: 1 - p.x) }
@@ -601,17 +677,24 @@ enum MarkupGeometry {
     static func mapped(_ annotation: Annotation, _ transform: (CGPoint) -> CGPoint) -> Annotation {
         var next = annotation
         switch annotation.kind {
-        case let .text(anchor, content, sizeFraction, color):
+        case let .text(anchor, content, sizeFraction, color, hasBackground):
             next.kind = .text(anchor: transform(anchor), content: content,
+                              sizeFraction: sizeFraction, color: color,
+                              hasBackground: hasBackground)
+        case let .step(anchor, number, sizeFraction, color):
+            next.kind = .step(anchor: transform(anchor), number: number,
                               sizeFraction: sizeFraction, color: color)
         case let .stroke(points, widthLevel, color, style):
             next.kind = .stroke(points: points.map(transform), widthLevel: widthLevel,
                                 color: color, style: style)
         case let .mosaic(points, widthLevel, effect):
             next.kind = .mosaic(points: points.map(transform), widthLevel: widthLevel, effect: effect)
-        case let .shape(kind, from, to, widthLevel, color):
+        case let .mosaicRect(from, to, widthLevel, effect):
+            next.kind = .mosaicRect(from: transform(from), to: transform(to),
+                                    widthLevel: widthLevel, effect: effect)
+        case let .shape(kind, from, to, widthLevel, color, filled):
             next.kind = .shape(kind: kind, from: transform(from), to: transform(to),
-                               widthLevel: widthLevel, color: color)
+                               widthLevel: widthLevel, color: color, filled: filled)
         }
         return next
     }
@@ -619,16 +702,18 @@ enum MarkupGeometry {
 
 struct EditSnapshot: Equatable {
     var selection: CGRect
+    var ratio: CropRatio = .free
     var quarterTurns: Int
     var flipH: Bool
     var flipV: Bool
     var straighten: Double
+    var adjustments: ImageAdjustments = ImageAdjustments()
     var annotations: [Annotation]
     /// 撤销后回到这一笔之前的选中。对象已不在列表里则为 nil。
     var selectedID: UUID?
 }
 
-/// 一张图在本次进程里的编辑会话:标记和裁切/旋转一起活,退出应用即丢。
+/// 一张图在本次进程里的编辑会话:标记和裁切/旋转/调色一起活,退出应用即丢。
 struct EditSession: Equatable, Sendable {
     var annotations: [Annotation] = []
     var selection: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
@@ -636,6 +721,7 @@ struct EditSession: Equatable, Sendable {
     var flipH = false
     var flipV = false
     var straighten = 0.0
+    var adjustments: ImageAdjustments = ImageAdjustments()
 
     var isPristine: Bool {
         annotations.isEmpty
@@ -646,5 +732,6 @@ struct EditSession: Equatable, Sendable {
             && ((quarterTurns % 4) + 4) % 4 == 0
             && !flipH && !flipV
             && abs(straighten) < 0.0001
+            && adjustments.isIdentity
     }
 }

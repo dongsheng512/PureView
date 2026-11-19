@@ -15,10 +15,12 @@ struct Histogram: Equatable {
     var red: [Int]
     var green: [Int]
     var blue: [Int]
+    /// 感知亮度通道(Rec.709: 0.2126R + 0.7152G + 0.0722B),用于直方图亮度模式切换。
+    var luminance: [Int] = []
     /// 参与统计的像素总数(降采样之后)。
     var sampleCount: Int
 
-    static let empty = Histogram(red: [], green: [], blue: [], sampleCount: 0)
+    static let empty = Histogram(red: [], green: [], blue: [], luminance: [], sampleCount: 0)
 
     var isEmpty: Bool { sampleCount == 0 }
 
@@ -79,7 +81,7 @@ struct Histogram: Equatable {
         let bytesPerRow = width * 4
 
         var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
-        let tallied: (red: [Int], green: [Int], blue: [Int], count: Int)? =
+        let tallied: (red: [Int], green: [Int], blue: [Int], luminance: [Int], count: Int)? =
             buffer.withUnsafeMutableBytes { raw in
                 guard let context = CGContext(data: raw.baseAddress,
                                               width: width,
@@ -102,20 +104,28 @@ struct Histogram: Equatable {
                 var red = [Int](repeating: 0, count: binCount)
                 var green = red
                 var blue = red
+                var luminance = red
                 var count = 0
                 for offset in stride(from: 0, to: bytesPerRow * height, by: 4) {
-                    red[Int(pixels[offset])] += 1
-                    green[Int(pixels[offset + 1])] += 1
-                    blue[Int(pixels[offset + 2])] += 1
+                    let r = Int(pixels[offset])
+                    let g = Int(pixels[offset + 1])
+                    let b = Int(pixels[offset + 2])
+                    red[r] += 1
+                    green[g] += 1
+                    blue[b] += 1
+                    // 定点近似 Rec.709 亮度: (54*R + 183*G + 19*B) >> 8,范围严格落在 0...255
+                    let luma = (54 * r + 183 * g + 19 * b) >> 8
+                    luminance[min(max(luma, 0), 255)] += 1
                     count += 1
                 }
-                return (red, green, blue, count)
+                return (red, green, blue, luminance, count)
             }
 
         guard let tallied else { return .empty }
         return Histogram(red: tallied.red,
                          green: tallied.green,
                          blue: tallied.blue,
+                         luminance: tallied.luminance,
                          sampleCount: tallied.count)
     }
 }

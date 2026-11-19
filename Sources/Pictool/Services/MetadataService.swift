@@ -14,8 +14,19 @@ struct InfoSection: Identifiable {
     let rows: [InfoRow]
 }
 
+struct ImageCoordinate: Equatable, Sendable {
+    let latitude: Double
+    let longitude: Double
+
+    /// Apple 地图深度链接
+    var appleMapsURL: URL? {
+        URL(string: String(format: "maps://?ll=%.6f,%.6f&q=%.6f,%.6f", latitude, longitude, latitude, longitude))
+    }
+}
+
 struct ImageInfo {
     let sections: [InfoSection]
+    var coordinate: ImageCoordinate? = nil
     var summaryText: String {
         sections
             .map { sec in
@@ -149,7 +160,11 @@ enum MetadataService {
         // ---- 图像 ----
         var imgRows: [InfoRow] = []
         imgRows.append(InfoRow(label: "格式", value: formatName(of: CGImageSourceGetType(source) as String?)))
-        if let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int {
+        if let storedW = props[kCGImagePropertyPixelWidth] as? Int,
+           let storedH = props[kCGImagePropertyPixelHeight] as? Int {
+            let swap = ImageLoader.orientationSwapsAxes(ImageLoader.orientation(from: props))
+            let w = swap ? storedH : storedW
+            let h = swap ? storedW : storedH
             imgRows.append(InfoRow(label: "像素尺寸", value: "\(w) × \(h)"))
         }
         if frameCount > 1 {
@@ -210,6 +225,7 @@ enum MetadataService {
         }
 
         // ---- GPS ----
+        var coordinate: ImageCoordinate?
         if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
            let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
            let lon = gps[kCGImagePropertyGPSLongitude] as? Double {
@@ -217,13 +233,14 @@ enum MetadataService {
             let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String ?? "E"
             let signedLat = latRef == "S" ? -lat : lat
             let signedLon = lonRef == "W" ? -lon : lon
+            coordinate = ImageCoordinate(latitude: signedLat, longitude: signedLon)
             sections.append(InfoSection(title: "GPS", rows: [
                 InfoRow(label: "纬度", value: String(format: "%.6f°", signedLat)),
                 InfoRow(label: "经度", value: String(format: "%.6f°", signedLon)),
             ]))
         }
 
-        return ImageInfo(sections: sections)
+        return ImageInfo(sections: sections, coordinate: coordinate)
     }
 
     static func exposureProgramName(_ value: Int) -> String {

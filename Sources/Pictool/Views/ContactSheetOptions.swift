@@ -135,10 +135,14 @@ struct ContactSheetOptionsForm: View {
 
             Divider()
 
-            Text(summary)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: 12) {
+                ContactSheetMiniPreview(metrics: metrics, filledCount: min(effectiveCount, metrics.perPage))
+                    .frame(width: 72, height: 72)
+                Text(summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: 8) {
                 Spacer()
@@ -169,6 +173,70 @@ struct ContactSheetOptionsForm: View {
                 .frame(width: 44, alignment: .leading)
             Spacer(minLength: 0)
             content()
+        }
+    }
+}
+
+/// 拼版实时线框预览:直观呈现当前纸张方向、M×N 网格占位与文件名条位置。
+private struct ContactSheetMiniPreview: View {
+    let metrics: ContactSheetLayout.Metrics
+    let filledCount: Int
+
+    var body: some View {
+        Canvas { context, size in
+            let pageAspect = metrics.pageSize.width / max(metrics.pageSize.height, 1)
+            let inset: CGFloat = 4
+            let availW = max(1, size.width - inset * 2)
+            let availH = max(1, size.height - inset * 2)
+            let paperW: CGFloat
+            let paperH: CGFloat
+            if availW / availH > pageAspect {
+                paperH = availH
+                paperW = paperH * pageAspect
+            } else {
+                paperW = availW
+                paperH = paperW / pageAspect
+            }
+            let paperRect = CGRect(
+                x: (size.width - paperW) / 2,
+                y: (size.height - paperH) / 2,
+                width: paperW,
+                height: paperH
+            )
+            let paperPath = Path(roundedRect: paperRect, cornerRadius: 3)
+            context.fill(paperPath, with: .color(Color.primary.opacity(0.06)))
+            context.stroke(paperPath, with: .color(Color.primary.opacity(0.22)), lineWidth: 1)
+
+            let scale = paperW / max(metrics.pageSize.width, 1)
+            let grid = ContactSheetLayout.grid(
+                pageSize: metrics.pageSize,
+                rows: metrics.rows,
+                columns: metrics.columns,
+                inset: metrics.inset,
+                spacing: metrics.spacing
+            )
+            for (index, rawCell) in grid.frames.enumerated() {
+                let cell = CGRect(
+                    x: paperRect.minX + rawCell.minX * scale,
+                    y: paperRect.minY + rawCell.minY * scale,
+                    width: max(1, rawCell.width * scale),
+                    height: max(1, rawCell.height * scale)
+                )
+                let isFilled = index < filledCount
+                let titleH = metrics.titleHeight > 0 ? min(cell.height * 0.25, max(1.5, metrics.titleHeight * scale)) : 0
+                let imgRect = CGRect(x: cell.minX, y: cell.minY, width: cell.width, height: max(1, cell.height - titleH))
+                let fill = isFilled ? Color.accentColor.opacity(0.35) : Color.primary.opacity(0.08)
+                context.fill(Path(roundedRect: imgRect, cornerRadius: 1), with: .color(fill))
+                if titleH > 0, isFilled {
+                    let bar = CGRect(
+                        x: cell.minX + cell.width * 0.15,
+                        y: imgRect.maxY + max(0.5, titleH * 0.25),
+                        width: cell.width * 0.7,
+                        height: max(1, titleH * 0.4)
+                    )
+                    context.fill(Path(bar), with: .color(Color.secondary.opacity(0.45)))
+                }
+            }
         }
     }
 }

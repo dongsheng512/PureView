@@ -4,11 +4,14 @@ import SwiftUI
 struct ThumbnailGridView: View {
 
     @Environment(FolderStore.self) private var store
+    @Environment(AnnotationStore.self) private var annotationStore
     /// 是否处于向上扩展态(由 SidebarView 持有,联动压缩文件夹树)
     @Binding var expanded: Bool
     @State private var headerHovering = false
     /// 过滤框焦点。写回 `store.isTextInputFocused`,让菜单里的裸键快捷键整体让路。
     @FocusState private var filterFocused: Bool
+    @AppStorage(ImageSortKey.storageKey) private var sortKey = ImageSortKey.defaultValue
+    @AppStorage(ImageSortDirection.storageKey) private var sortDirection = ImageSortDirection.defaultValue
 
     private let columns = [GridItem(.adaptive(minimum: 72, maximum: 120), spacing: 6)]
 
@@ -44,6 +47,9 @@ struct ThumbnailGridView: View {
                     .fixedSize()
                     .foregroundStyle(Color.accentColor)
                     .help("显示被隐藏的图片,或全部恢复")
+                }
+                if !store.images.isEmpty {
+                    sortMenuButton
                 }
                 Image(systemName: expanded ? "chevron.down" : "chevron.up")
                     .font(.system(size: 11, weight: .medium))
@@ -86,7 +92,13 @@ struct ThumbnailGridView: View {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 10) {
                             ForEach(Array(store.visibleImages.enumerated()), id: \.element.id) { idx, file in
-                                ThumbCell(file: file, isCurrent: file.id == store.selectedImageID, isVisible: idx < 30)
+                                ThumbCell(
+                                    file: file,
+                                    isCurrent: file.id == store.selectedImageID,
+                                    isVisible: idx < 30,
+                                    revision: store.imageRevision(for: file.url),
+                                    hasUnsavedEdit: annotationStore.hasSession(for: file.url)
+                                )
                                     .id(file.id)
                                     .onTapGesture { store.selectImage(file.id) }
                                     .contextMenu {
@@ -94,6 +106,9 @@ struct ThumbnailGridView: View {
                                             store.copyImageToPasteboard(file.id)
                                         } label: {
                                             Label("复制图片", systemImage: "doc.on.doc")
+                                        }
+                                        ShareLink(item: file.url) {
+                                            Label("共享…", systemImage: "square.and.arrow.up")
                                         }
                                         Button {
                                             store.hideImage(file.id)
@@ -130,6 +145,43 @@ struct ThumbnailGridView: View {
             : "缩略图 · \(store.images.count)"
     }
 
+    /// 快捷排序下拉菜单(直接写回 AppStorage,与偏好设置双向同步)
+    private var sortMenuButton: some View {
+        Menu {
+            ForEach(ImageSortKey.allCases) { key in
+                Button {
+                    sortKey = key
+                } label: {
+                    if sortKey == key {
+                        Label(key.label, systemImage: "checkmark")
+                    } else {
+                        Text(key.label)
+                    }
+                }
+            }
+            Divider()
+            ForEach(ImageSortDirection.allCases) { dir in
+                Button {
+                    sortDirection = dir
+                } label: {
+                    if sortDirection == dir {
+                        Label(dir.label, systemImage: "checkmark")
+                    } else {
+                        Text(dir.label)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("排序: \(sortKey.label) · \(sortDirection.label)")
+    }
+
     /// 过滤输入框。绑定走 `store.setFilter` 而不是直接写字段 ——
     /// 改过滤词必须顺手收拢被筛掉的选中项,这个不变式由 store 自己守。
     private var filterField: some View {
@@ -161,6 +213,9 @@ struct ThumbnailGridView: View {
         .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.06)))
         .onChange(of: filterFocused) { _, focused in
             store.isTextInputFocused = focused
+        }
+        .onChange(of: store.filterFocusToken) { _, _ in
+            filterFocused = true
         }
         .onExitCommand { filterFocused = false }
         .onDisappear {
@@ -233,10 +288,13 @@ struct ThumbCell: View {
     let file: ImageFile
     let isCurrent: Bool
     var isVisible: Bool = false
+    var revision: Int = 0
+    var hasUnsavedEdit: Bool = false
     @State private var thumb: NSImage?
     /// 解码失败标记。不记这个的话 thumb 永远是 nil,
     /// .task(id:) 只在 id 变化时重跑,失败项会永远卡在转圈。
     @State private var failed = false
+    @State private var loadedRevision = -1
 
     var body: some View {
         VStack(spacing: 4) {
@@ -265,6 +323,16 @@ struct ThumbCell: View {
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(isCurrent ? Color.accentColor : .clear, lineWidth: 2.5)
             )
+            .overlay(alignment: .topTrailing) {
+                if hasUnsavedEdit {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 7, height: 7)
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.9), lineWidth: 1))
+                        .padding(5)
+                        .help("有尚未导出的编辑")
+                }
+            }
 
             Text(file.name)
                 .font(.system(size: 10))
@@ -278,14 +346,20 @@ struct ThumbCell: View {
                 .fill(isCurrent ? Color.accentColor.opacity(0.15) : Color.clear)
         )
         .contentShape(Rectangle())
-        .task(id: file.id) {
-            guard thumb == nil, !failed else { return }
+        .task(id: "\(file.id.path)#\(revision)") {
+            guard loadedRevision != revision || (thumb == nil && !failed) else { return }
+            if loadedRevision != revision {
+                failed = false
+            }
             let loaded = await ThumbnailProvider.shared.asyncThumbnail(
                 for: file.url, maxPixel: 180, isVisible: isVisible
             )
+            loadedRevision = revision
             if let loaded {
                 thumb = loaded
+                failed = false
             } else {
+                thumb = nil
                 failed = true
             }
         }

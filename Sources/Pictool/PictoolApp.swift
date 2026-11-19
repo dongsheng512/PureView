@@ -8,6 +8,7 @@ extension Notification.Name {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: FolderStore?
+    weak var annotations: AnnotationStore?
 
     func application(_ application: NSApplication, openFile filename: String) -> Bool {
         let url = URL(fileURLWithPath: filename)
@@ -23,6 +24,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let annotations, annotations.hasUnsavedSessions else { return .terminateNow }
+        let count = annotations.unsavedSessionCount
+        let alert = NSAlert()
+        alert.messageText = "仍有 \(count) 张图片的编辑尚未导出"
+        alert.informativeText = "直接退出将丢弃尚未导出或覆盖保存的裁切与标记内容。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "仍要退出")
+        return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
     }
 
     private func handle(urls: [URL]) {
@@ -64,7 +77,10 @@ struct PictoolApp: App {
                 .environment(store)
                 .environment(annotations)
                 .ignoresSafeArea(.container, edges: .top)
-                .onAppear { delegate.store = store }
+                .onAppear {
+                    delegate.store = store
+                    delegate.annotations = annotations
+                }
                 .onReceive(NotificationCenter.default.publisher(for: .openExternalURLs)) { note in
                     if let urls = note.object as? [URL] {
                         if urls.count == 1, let url = urls.first {
@@ -139,6 +155,9 @@ struct PictoolApp: App {
                 Button("下一张") { store.step(1) }
                     .keyboardShortcut(.rightArrow, modifiers: [])
                     .disabled(!store.canStep(1) || store.isModalPresented || textInputActive)
+                Button("过滤文件名…") { store.requestFocusFilter() }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .disabled(store.images.isEmpty || store.isImmersive || store.isModalPresented)
                 Divider()
                 Button("适配窗口") { store.requestZoom(.fit) }
                     .keyboardShortcut("0", modifiers: [])

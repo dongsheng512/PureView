@@ -1312,7 +1312,7 @@ final class MarkupGeometryTests: XCTestCase {
         let roundTrip = MarkupGeometry.mapped(
             MarkupGeometry.mapped(original, MarkupGeometry.rotateCW90), MarkupGeometry.rotateCCW90
         )
-        guard case let .text(anchor, content, sizeFraction, color) = roundTrip.kind else {
+        guard case let .text(anchor, content, sizeFraction, color, _) = roundTrip.kind else {
             return XCTFail("kind must stay .text")
         }
         XCTAssertEqual(anchor.x, 0.2, accuracy: 0.0001)
@@ -1331,7 +1331,7 @@ final class MarkupGeometryTests: XCTestCase {
     func testOffsetNudgesAndKeepsPayload() {
         let text = Annotation.Kind.text(anchor: CGPoint(x: 0.2, y: 0.3), content: "hi",
                                         sizeFraction: 0.05, color: .palette(2))
-        guard case let .text(anchor, content, size, color) =
+        guard case let .text(anchor, content, size, color, _) =
                 MarkupGeometry.offset(text, dx: MarkupGeometry.pasteNudge, dy: MarkupGeometry.pasteNudge) else {
             return XCTFail("text")
         }
@@ -1360,7 +1360,7 @@ final class MarkupGeometryTests: XCTestCase {
             kind: .rect, from: CGPoint(x: 0.8, y: 0.8), to: CGPoint(x: 0.95, y: 0.9),
             widthLevel: 1, color: .palette(0)
         )
-        guard case let .shape(kind, from, to, width, color) =
+        guard case let .shape(kind, from, to, width, color, _) =
                 MarkupGeometry.offset(shape, dx: 0.2, dy: 0.2) else {
             return XCTFail("shape")
         }
@@ -2018,17 +2018,17 @@ final class ImageHandoffTests: XCTestCase {
     }
 
     func testSlideTimingFollowsDirectionAndRapidRepeat() {
-        XCTAssertEqual(ImageHandoff.duration(direction: 1, rapid: false), 0.38, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.duration(direction: 1, rapid: false), 0.30, accuracy: 0.001)
         XCTAssertEqual(ImageHandoff.duration(direction: 0, rapid: false), 0.16, accuracy: 0.001)
-        XCTAssertEqual(ImageHandoff.duration(direction: -1, rapid: true), 0.22, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.duration(direction: -1, rapid: true), 0.20, accuracy: 0.001)
         XCTAssertEqual(ImageHandoff.duration(direction: 0, rapid: true), 0.10, accuracy: 0.001)
-        // 800pt / 4000pt/s = 0.2,夹到下限 0.22。慢拖用 0.36。
+        // 快甩顺势收紧时长;临界阻尼(bounce = 0),不拖尾锁死画布。
         let flick = ImageHandoff.pagingRelease(distance: -800, velocity: -4000)
-        XCTAssertEqual(flick.perceptualDuration, 0.27, accuracy: 0.001)
+        XCTAssertEqual(flick.perceptualDuration, 0.23, accuracy: 0.001)
         XCTAssertEqual(flick.initialVelocity, 5, accuracy: 0.001)
-        XCTAssertEqual(flick.bounce, -0.18, accuracy: 0.001)
+        XCTAssertEqual(flick.bounce, 0, accuracy: 0.001)
         let slow = ImageHandoff.pagingRelease(distance: -700, velocity: 0)
-        XCTAssertEqual(slow.perceptualDuration, 0.40, accuracy: 0.001)
+        XCTAssertEqual(slow.perceptualDuration, 0.32, accuracy: 0.001)
         XCTAssertEqual(slow.initialVelocity, 0, accuracy: 0.001)
         // 还在往左甩,落点却在右边:速度是离开落点的,弹簧要先顺着手指再拉回来。
         let away = ImageHandoff.pagingRelease(distance: 200, velocity: -500)
@@ -2160,6 +2160,51 @@ final class ImageHandoffTests: XCTestCase {
             ),
             1
         )
+    }
+
+    func testNeighborSitsJustOutsideAndAWiderPageClears() {
+        let viewport: CGFloat = 743
+        let wide: CGFloat = 678
+        let tall: CGFloat = 518
+        // 铺满视口时,贴边偏移就是整页。
+        XCTAssertEqual(
+            ImageHandoff.neighborShift(direction: 1, imageWidth: viewport, viewportWidth: viewport),
+            ImageHandoff.pageOffset(direction: 1, viewportWidth: viewport),
+            accuracy: 0.001
+        )
+        // 竖图的左边缘停在视口外一条缝,不按整页中心再空出半截。
+        let shift = ImageHandoff.neighborShift(direction: 1, imageWidth: tall, viewportWidth: viewport)
+        let nearEdge = (viewport - tall) / 2 + shift
+        XCTAssertEqual(nearEdge, viewport + ImageHandoff.pageGap, accuracy: 0.001)
+        let commit = ImageHandoff.commitTranslation(direction: 1, imageWidth: tall, viewportWidth: viewport)
+        XCTAssertEqual(commit, -shift, accuracy: 0.001)
+
+        // 宽图切到竖图:新图居中时宽图还露着,要再往左多走,右边沿停在视口外。
+        let extra = ImageHandoff.outgoingExtra(
+            direction: 1, outgoingWidth: wide, incomingWidth: tall, viewportWidth: viewport
+        )
+        XCTAssertLessThan(extra, 0)
+        let trailing = viewport / 2 + wide / 2 + commit + extra
+        XCTAssertEqual(trailing, -ImageHandoff.pageGap, accuracy: 0.001)
+        // 半路只走一半,不会一下跳完。
+        XCTAssertEqual(
+            ImageHandoff.outgoingBoost(shared: commit / 2, commit: commit, extra: extra),
+            extra / 2,
+            accuracy: 0.001
+        )
+
+        // 竖图切到横图:竖图自己会先离开,不再把它拖慢。
+        let back = ImageHandoff.outgoingExtra(
+            direction: 1, outgoingWidth: tall, incomingWidth: wide, viewportWidth: viewport
+        )
+        XCTAssertEqual(back, 0, accuracy: 0.001)
+
+        // 整张还在,或者两张本来就贴着页缝,不淡。只剩一条边并且中间有空当才淡掉。
+        XCTAssertEqual(ImageHandoff.sliverOpacity(visible: 400, hole: 120), 1, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.sliverOpacity(visible: 10, hole: ImageHandoff.pageGap), 1, accuracy: 0.001)
+        XCTAssertEqual(ImageHandoff.sliverOpacity(visible: 10, hole: 120), 0, accuracy: 0.001)
+        XCTAssertGreaterThan(ImageHandoff.sliverOpacity(visible: 40, hole: 120), 0)
+        XCTAssertLessThan(ImageHandoff.sliverOpacity(visible: 40, hole: 120), 0.4)
     }
 
     func testFittedRectCentersAndKeepsAspect() {
@@ -2878,5 +2923,324 @@ final class HistogramTests: XCTestCase {
         let short = Histogram.empty.normalized([1, 2, 3])
         XCTAssertEqual(short.count, Histogram.binCount)
         XCTAssertTrue(short.allSatisfy { $0 == 0 })
+    }
+}
+
+/// P0/P1 回归测试:EXIF 信息面板尺寸摆正、覆盖保存缓存失效与 FolderStore 过滤缓存同步。
+final class OptimizationRegressionTests: XCTestCase {
+
+    private var tempURLs: [URL] = []
+
+    override func tearDown() {
+        for url in tempURLs { try? FileManager.default.removeItem(at: url) }
+        tempURLs.removeAll()
+        super.tearDown()
+    }
+
+    private func makeJPEG(width: Int, height: Int, orientation: Int = 1) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pictool-opt-\(UUID().uuidString).jpg")
+        tempURLs.append(url)
+        let ctx = try XCTUnwrap(CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ))
+        ctx.setFillColor(CGColor(red: 0.3, green: 0.6, blue: 0.9, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let cg = try XCTUnwrap(ctx.makeImage())
+        let dest = try XCTUnwrap(CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.jpeg.identifier as CFString, 1, nil
+        ))
+        let props: [CFString: Any] = [
+            kCGImagePropertyOrientation: orientation,
+            kCGImageDestinationLossyCompressionQuality: 0.9,
+        ]
+        CGImageDestinationAddImage(dest, cg, props as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        return url
+    }
+
+    /// 信息面板像素尺寸必须与 ImageLoader.facts 一致(orientation 5...8 交换宽高)。
+    func testMetadataInfoSwapsPixelDimensionsForRotatedEXIF() throws {
+        let url = try makeJPEG(width: 400, height: 200, orientation: 6)
+        let facts = ImageLoader.facts(of: url)
+        XCTAssertEqual(facts.pixelWidth, 200)
+        XCTAssertEqual(facts.pixelHeight, 400)
+
+        let info = MetadataService.info(for: url)
+        let imageSection = try XCTUnwrap(info.sections.first(where: { $0.title == "图像" }))
+        let dimRow = try XCTUnwrap(imageSection.rows.first(where: { $0.label == "像素尺寸" }))
+        XCTAssertEqual(dimRow.value, "200 × 400")
+    }
+
+    /// 覆盖保存后 ThumbnailProvider 与 DisplayImageCache 必须清除对应 URL 的旧条目。
+    func testCacheInvalidationRemovesStoredEntries() async throws {
+        let url = try makeJPEG(width: 300, height: 200)
+        _ = await ThumbnailProvider.shared.asyncThumbnail(for: url, maxPixel: 180)
+        XCTAssertNotNil(ThumbnailProvider.shared.cachedThumbnail(for: url))
+
+        _ = await DisplayImageCache.shared.image(for: url, maxPixelSize: 300)
+        XCTAssertNotNil(DisplayImageCache.shared.cached(url: url, requestedMaxPixel: 300))
+
+        ThumbnailProvider.shared.invalidate(url: url)
+        DisplayImageCache.shared.invalidate(url: url)
+
+        XCTAssertNil(ThumbnailProvider.shared.cachedThumbnail(for: url))
+        XCTAssertNil(DisplayImageCache.shared.cached(url: url, requestedMaxPixel: 300))
+    }
+
+    /// 覆盖原图时 FolderStore 递增修订号并归零显示旋转态。
+    @MainActor
+    func testDidOverwriteImageIncrementsRevisionAndResetsRotation() throws {
+        let url = try makeJPEG(width: 120, height: 80)
+        let store = FolderStore()
+        store.setSelectedImage(url)
+        store.isDisplayRotated = true
+
+        XCTAssertEqual(store.imageRevision(for: url), 0)
+        store.didOverwriteImage(url)
+        XCTAssertEqual(store.imageRevision(for: url), 1)
+        XCTAssertEqual(store.rotationCount, 0)
+        XCTAssertFalse(store.isDisplayRotated)
+    }
+
+    /// 亮度直方图应准确反映 Rec.709 感知亮度(纯绿亮于纯蓝)。
+    func testHistogramComputesLuminanceChannel() throws {
+        func solid(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> CGImage? {
+            var bytes = [UInt8](repeating: 0, count: 16 * 16 * 4)
+            for i in stride(from: 0, to: bytes.count, by: 4) {
+                bytes[i] = r; bytes[i + 1] = g; bytes[i + 2] = b; bytes[i + 3] = 255
+            }
+            return bytes.withUnsafeMutableBytes { raw in
+                CGContext(
+                    data: raw.baseAddress, width: 16, height: 16,
+                    bitsPerComponent: 8, bytesPerRow: 16 * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                )?.makeImage()
+            }
+        }
+        let green = try XCTUnwrap(solid(0, 200, 0))
+        let blue = try XCTUnwrap(solid(0, 0, 200))
+        let greenHist = Histogram.compute(from: green)
+        let blueHist = Histogram.compute(from: blue)
+        XCTAssertEqual(greenHist.luminance.count, Histogram.binCount)
+        let greenBin = try XCTUnwrap(greenHist.luminance.firstIndex(where: { $0 > 0 }))
+        let blueBin = try XCTUnwrap(blueHist.luminance.firstIndex(where: { $0 > 0 }))
+        XCTAssertGreaterThan(greenBin, blueBin)
+    }
+
+    /// GPS 坐标生成的 Apple 地图链接包含正确的经纬度参数。
+    func testImageCoordinateGeneratesAppleMapsURL() throws {
+        let coord = ImageCoordinate(latitude: 31.2304, longitude: 121.4737)
+        let url = try XCTUnwrap(coord.appleMapsURL)
+        XCTAssertEqual(url.scheme, "maps")
+        XCTAssertTrue(url.absoluteString.contains("ll=31.230400,121.473700"))
+    }
+
+    /// AnnotationStore 正确汇报未导出编辑会话数量，供退出前保护使用。
+    @MainActor
+    func testAnnotationStoreReportsUnsavedSessions() {
+        let store = AnnotationStore()
+        XCTAssertFalse(store.hasUnsavedSessions)
+        let url = URL(fileURLWithPath: "/tmp/pictool-unsaved.jpg")
+        store.setSession(EditSession(quarterTurns: 1), for: url)
+        XCTAssertTrue(store.hasUnsavedSessions)
+        XCTAssertEqual(store.unsavedSessionCount, 1)
+        store.setSession(EditSession(), for: url)
+        XCTAssertFalse(store.hasUnsavedSessions)
+    }
+
+    /// 首次绘制形状按住 Shift:矩形锁 1:1 正方形,直线锁 45° 整数倍角度。
+    func testConstrainedNewShapeEndLocksAspectAndAngle() {
+        let imgSize = CGSize(width: 1000, height: 500)
+        let sq = MarkupGeometry.constrainedNewShapeEnd(
+            kind: .rect, from: CGPoint(x: 0.2, y: 0.2), to: CGPoint(x: 0.4, y: 0.3), imageSize: imgSize
+        )
+        XCTAssertEqual((sq.x - 0.2) * imgSize.width, (sq.y - 0.2) * imgSize.height, accuracy: 0.5)
+
+        let line = MarkupGeometry.constrainedNewShapeEnd(
+            kind: .line, from: CGPoint(x: 0.2, y: 0.5), to: CGPoint(x: 0.5, y: 0.53), imageSize: imgSize
+        )
+        XCTAssertEqual(line.y, 0.5, accuracy: 0.001)
+    }
+
+    /// 框选马赛克与文字底衬都能正常产出非空像素叠层。
+    func testMosaicRectAndTextBackgroundRenderOverlay() throws {
+        let size = CGSize(width: 200, height: 200)
+        let baseCtx = try XCTUnwrap(CGContext(
+            data: nil, width: 200, height: 200,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        baseCtx.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+        baseCtx.fill(CGRect(origin: .zero, size: size))
+        let base = try XCTUnwrap(baseCtx.makeImage())
+
+        let anns: [Annotation] = [
+            Annotation(kind: .mosaicRect(from: CGPoint(x: 0.1, y: 0.1), to: CGPoint(x: 0.5, y: 0.5),
+                                         widthLevel: 1, effect: .pixelate)),
+            Annotation(kind: .text(anchor: CGPoint(x: 0.2, y: 0.6), content: "PureView",
+                                   sizeFraction: 0.08, color: .palette(1), hasBackground: true))
+        ]
+        let overlay = AnnotationRenderer.renderOverlay(annotations: anns, canvasSize: size, base: base)
+        XCTAssertNotNil(overlay)
+    }
+
+    /// 调色管线：identity 直通，曝光提亮，色温正向偏暖（R > B），去饱和度灰阶化，自动增强产出同尺寸位图。
+    func testImageAdjustmentServiceFiltersAndDirection() throws {
+        let size = CGSize(width: 64, height: 64)
+        let ctx = try XCTUnwrap(CGContext(
+            data: nil, width: 64, height: 64,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.setFillColor(CGColor(red: 0.4, green: 0.4, blue: 0.4, alpha: 1))
+        ctx.fill(CGRect(origin: .zero, size: size))
+        let gray = try XCTUnwrap(ctx.makeImage())
+
+        func centerRGB(_ image: CGImage) throws -> (r: UInt8, g: UInt8, b: UInt8) {
+            var bytes = [UInt8](repeating: 0, count: 4)
+            let c = try XCTUnwrap(CGContext(
+                data: &bytes, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ))
+            c.draw(image, in: CGRect(x: -32, y: -32, width: 64, height: 64))
+            return (bytes[0], bytes[1], bytes[2])
+        }
+
+        // 1. Identity returns identical CGImage reference
+        let same = ImageAdjustmentService.apply(ImageAdjustments(), to: gray)
+        XCTAssertTrue(same === gray)
+
+        // 2. Positive exposure brightens mid-gray
+        let baseRGB = try centerRGB(gray)
+        let brighter = ImageAdjustmentService.apply(ImageAdjustments(exposure: 1.0), to: gray)
+        let brightRGB = try centerRGB(brighter)
+        XCTAssertGreaterThan(brightRGB.r, baseRGB.r + 30)
+
+        // 3. Positive warmth shifts gray warmer (R > B)
+        let warmer = ImageAdjustmentService.apply(ImageAdjustments(warmth: 0.8), to: gray)
+        let warmRGB = try centerRGB(warmer)
+        XCTAssertGreaterThan(warmRGB.r, warmRGB.b, "正色温应使画面偏暖(R > B)")
+
+        // 4. Auto enhance returns same dimensions
+        let auto = ImageAdjustmentService.apply(ImageAdjustments(autoEnhanced: true), to: gray)
+        XCTAssertEqual(auto.width, gray.width)
+        XCTAssertEqual(auto.height, gray.height)
+
+        // 5. EditSession.isPristine tracks adjustments
+        var session = EditSession()
+        XCTAssertTrue(session.isPristine)
+        session.adjustments.exposure = 0.5
+        XCTAssertFalse(session.isPristine)
+    }
+
+    /// 导出尺寸预设、体积预估、步骤序号气泡与半透明填充形状渲染回归测试。
+    func testExportResizeStepBadgeAndFilledShape() throws {
+        // 1. ExportResizePreset 计算
+        let src = CGSize(width: 4000, height: 3000)
+        XCTAssertEqual(ExportResizePreset.original.outputPixelSize(sourcePixelSize: src, customPixels: 0), src)
+        XCTAssertEqual(ExportResizePreset.percent50.outputPixelSize(sourcePixelSize: src, customPixels: 0),
+                       CGSize(width: 2000, height: 1500))
+        XCTAssertEqual(ExportResizePreset.max1920.outputPixelSize(sourcePixelSize: src, customPixels: 0),
+                       CGSize(width: 1920, height: 1440))
+        XCTAssertEqual(ExportResizePreset.custom.outputPixelSize(sourcePixelSize: src, customPixels: 1000),
+                       CGSize(width: 1000, height: 750))
+
+        // 2. 体积预估与步骤序号 + 填充形状渲染
+        let size = CGSize(width: 240, height: 240)
+        let ctx = try XCTUnwrap(CGContext(
+            data: nil, width: 240, height: 240,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.setFillColor(CGColor(red: 0.25, green: 0.35, blue: 0.55, alpha: 1))
+        ctx.fill(CGRect(origin: .zero, size: size))
+        let base = try XCTUnwrap(ctx.makeImage())
+
+        let est = CropService.estimateEncodedSize(
+            preview: base,
+            normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1),
+            targetPixelSize: CGSize(width: 1200, height: 1200),
+            format: .jpeg,
+            quality: 0.85
+        )
+        XCTAssertGreaterThan(est ?? 0, 1000)
+
+        let stepAnchor = CGPoint(x: 0.3, y: 0.3)
+        XCTAssertTrue(MarkupGeometry.stepHit(point: stepAnchor, anchor: stepAnchor,
+                                             sizeFraction: 0.05, imageSize: size))
+        XCTAssertFalse(MarkupGeometry.stepHit(point: CGPoint(x: 0.9, y: 0.9), anchor: stepAnchor,
+                                              sizeFraction: 0.05, imageSize: size))
+
+        let anns: [Annotation] = [
+            Annotation(kind: .step(anchor: stepAnchor, number: 1, sizeFraction: 0.06, color: .red)),
+            Annotation(kind: .shape(kind: .rect, from: CGPoint(x: 0.5, y: 0.5), to: CGPoint(x: 0.8, y: 0.8),
+                                    widthLevel: 1, color: .red, filled: true)),
+        ]
+        let overlay = AnnotationRenderer.renderOverlay(annotations: anns, canvasSize: size, base: base)
+        XCTAssertNotNil(overlay)
+    }
+
+    /// 幻灯片随机不重复、非循环到尾自动暂停与进度跳转回归测试。
+    @MainActor
+    func testSlideshowShuffleNonLoopAndJump() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PictoolSlideshowTest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        for name in ["a.png", "b.png", "c.png"] {
+            try Data([0x89, 0x50, 0x4E, 0x47]).write(to: dir.appendingPathComponent(name))
+        }
+
+        let store = FolderStore()
+        store.openFolder(dir)
+        for _ in 0..<40 where store.visibleImages.count < 3 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(store.visibleImages.count, 3)
+
+        // 非循环模式播到最后一张应自动暂停
+        store.slideshowLoop = false
+        store.slideshowShuffle = false
+        store.startSlideshow()
+        XCTAssertTrue(store.isSlideshowActive)
+        XCTAssertFalse(store.isSlideshowPaused)
+
+        store.advanceSlideshow()
+        XCTAssertEqual(store.visibleIndex, 1)
+        store.advanceSlideshow()
+        XCTAssertEqual(store.visibleIndex, 2)
+        store.advanceSlideshow()
+        XCTAssertTrue(store.isSlideshowPaused, "非循环模式到达末张应自动暂停")
+
+        // 进度跳转
+        store.jumpToVisibleIndex(0)
+        XCTAssertEqual(store.visibleIndex, 0)
+
+        // 随机模式开启且非循环：剩余 2 张不重复访问，随后自动暂停
+        store.slideshowShuffle = true
+        store.toggleSlideshow() // resume
+        XCTAssertFalse(store.isSlideshowPaused)
+        var visited: Set<Int> = [store.visibleIndex]
+        store.advanceSlideshow()
+        visited.insert(store.visibleIndex)
+        store.advanceSlideshow()
+        visited.insert(store.visibleIndex)
+        XCTAssertEqual(visited.count, 3)
+        store.advanceSlideshow()
+        XCTAssertTrue(store.isSlideshowPaused)
+
+        store.endSlideshow()
+        XCTAssertFalse(store.isSlideshowActive)
     }
 }

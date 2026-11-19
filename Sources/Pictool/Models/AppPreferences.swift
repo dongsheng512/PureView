@@ -40,13 +40,13 @@ struct ImageNeighbors: Equatable, Sendable {
 
 /// 交叠滑移的时长与位移。纯函数,方便单测。
 enum ImageHandoff {
-    /// 有方向的整页滑移 380ms,连按还没放完时 220ms。无方向交叉淡化 160ms / 100ms。
+    /// 有方向的整页滑移 300ms,连按还没放完时 200ms。无方向交叉淡化 160ms / 100ms。
     static func duration(direction: Int, rapid: Bool) -> TimeInterval {
         if direction == 0 { return rapid ? 0.10 : 0.16 }
-        return rapid ? 0.22 : 0.38
+        return rapid ? 0.20 : 0.30
     }
 
-    /// 松手后的弹簧。`distance` 是还要走的位移(落点减现在),`velocity` 是手指速度,点/秒。
+    /// 松手后的弹簧(苹果相册临界阻尼手感)。`distance` 是还要走的位移(落点减现在),`velocity` 是手指速度,点/秒。
     /// `initialVelocity` 朝向落点为正,1 表示按这个速度一秒能走完剩下的路。
     struct PagingRelease: Equatable {
         var perceptualDuration: TimeInterval
@@ -60,11 +60,11 @@ enum ImageHandoff {
         let perceptualDuration: TimeInterval
         if speed > 900, remaining > 1 {
             // 快甩时顺着当前速度把剩下的路走完,不要先停一下再起步。
-            perceptualDuration = min(0.46, max(0.26, TimeInterval(remaining / speed) * 1.35))
+            perceptualDuration = min(0.32, max(0.20, TimeInterval(remaining / speed) * 1.15))
         } else if remaining < 48 {
-            perceptualDuration = 0.28
+            perceptualDuration = 0.24
         } else {
-            perceptualDuration = 0.40
+            perceptualDuration = 0.32
         }
         var initialVelocity: CGFloat = 0
         if remaining > 1 {
@@ -72,10 +72,10 @@ enum ImageHandoff {
         }
         if !initialVelocity.isFinite { initialVelocity = 0 }
         initialVelocity = min(6, max(-6, initialVelocity))
-        // 略过阻尼,停在落点上,不冲进再下一张。
+        // 临界阻尼(bounce = 0):干脆停在落点,既不回弹过冲,也不像过阻尼那样拖尾近 1 秒锁死画布。
         return PagingRelease(
             perceptualDuration: perceptualDuration,
-            bounce: -0.18,
+            bounce: 0,
             initialVelocity: initialVelocity
         )
     }
@@ -146,20 +146,134 @@ enum ImageHandoff {
         return -CGFloat(direction) * (viewportWidth + gap)
     }
 
-    /// 跟手位移。手指往哪,图往哪,有邻图时 1:1,最多拉过一整页。
+    /// 邻图贴着视口外侧摆,靠近的那条边停在视口外 `gap` 处。
+    /// 返回值加在「已经居中的适配矩形」的 origin.x 上。
+    /// 铺满视口时等于整页偏移。图比视口窄时如果仍按整页中心去摆,
+    /// 两张图中间会空出一大块,宽图或竖图的边就会剩成一条。
+    static func neighborShift(
+        direction: Int,
+        imageWidth: CGFloat,
+        viewportWidth: CGFloat,
+        gap: CGFloat = pageGap
+    ) -> CGFloat {
+        guard direction != 0, viewportWidth > 0, imageWidth > 0 else { return 0 }
+        let centered = (viewportWidth - imageWidth) / 2
+        if direction > 0 {
+            return viewportWidth + gap - centered
+        }
+        return -gap - imageWidth - centered
+    }
+
+    /// 松手后内容要落到的位移,把指定宽度的邻图拉到视口中央。
+    /// 宽度还未知时退回整页(`viewport + gap`)。
+    static func commitTranslation(
+        direction: Int,
+        imageWidth: CGFloat,
+        viewportWidth: CGFloat,
+        gap: CGFloat = pageGap
+    ) -> CGFloat {
+        guard direction != 0, viewportWidth > 0 else { return 0 }
+        guard imageWidth > 1 else {
+            return commitTranslation(direction: direction, viewportWidth: viewportWidth, gap: gap)
+        }
+        return -neighborShift(
+            direction: direction,
+            imageWidth: imageWidth,
+            viewportWidth: viewportWidth,
+            gap: gap
+        )
+    }
+
+    /// 新图走到正中时,旧图若还留在画面里,要再多走的距离(带方向)。
+    /// 竖图切到更宽的图时,旧图自己会先离开,这里返回 0,不会把它拖慢。
+    static func outgoingExtra(
+        direction: Int,
+        outgoingWidth: CGFloat,
+        incomingWidth: CGFloat,
+        viewportWidth: CGFloat,
+        gap: CGFloat = pageGap
+    ) -> CGFloat {
+        guard direction != 0, outgoingWidth > 1, incomingWidth > 1, viewportWidth > 1 else { return 0 }
+        let commit = commitTranslation(
+            direction: direction,
+            imageWidth: incomingWidth,
+            viewportWidth: viewportWidth,
+            gap: gap
+        )
+        let center = viewportWidth / 2
+        if direction > 0 {
+            let trailing = center + outgoingWidth / 2 + commit
+            return min(0, -gap - trailing)
+        }
+        let leading = center - outgoingWidth / 2 + commit
+        return max(0, viewportWidth + gap - leading)
+    }
+
+    /// 旧图多走的那一段按进度摊开。手指在半路时不会一下跳到终点。
+    static func outgoingBoost(shared: CGFloat, commit: CGFloat, extra: CGFloat) -> CGFloat {
+        guard commit != 0, extra != 0, shared != 0 else { return 0 }
+        if (commit < 0 && shared > 0) || (commit > 0 && shared < 0) { return 0 }
+        let progress = min(1, max(0, shared / commit))
+        return extra * progress
+    }
+
+    /// 旧图只剩一条边,而且和下一张之间的空当比页缝大,才把这条边淡掉。
+    /// 整张还在画面里时保持不透明,避免一切页图就自己化掉。
+    static func sliverOpacity(visible: CGFloat, hole: CGFloat, gap: CGFloat = pageGap) -> CGFloat {
+        guard hole > gap + 8 else { return 1 }
+        let full: CGFloat = 72
+        let gone: CGFloat = 16
+        if visible >= full { return 1 }
+        if visible <= gone { return 0 }
+        let t = (visible - gone) / (full - gone)
+        return t * t
+    }
+
+    /// 由两张图现在的中心算旧图该有的不透明度。`direction > 0` 表示旧图向左离开。
+    static func sliverOpacity(
+        outgoingCenter: CGFloat,
+        outgoingWidth: CGFloat,
+        incomingCenter: CGFloat,
+        incomingWidth: CGFloat,
+        viewportWidth: CGFloat,
+        direction: Int,
+        gap: CGFloat = pageGap
+    ) -> CGFloat {
+        guard direction != 0, outgoingWidth > 1, incomingWidth > 1, viewportWidth > 1 else { return 1 }
+        let visible: CGFloat
+        let hole: CGFloat
+        if direction > 0 {
+            let trailing = outgoingCenter + outgoingWidth / 2
+            let leading = incomingCenter - incomingWidth / 2
+            visible = trailing
+            hole = leading - trailing
+        } else {
+            let leading = outgoingCenter - outgoingWidth / 2
+            let trailing = incomingCenter + incomingWidth / 2
+            visible = viewportWidth - leading
+            hole = leading - trailing
+        }
+        return sliverOpacity(visible: visible, hole: hole, gap: gap)
+    }
+
+    /// 跟手位移。手指往哪,图往哪,有邻图时 1:1,最多拉到那张图居中。
     /// 往左(负)是下一张,往右(正)是上一张。到头则走系统滚动那条橡皮筋。
+    /// `nextTravel` / `previousTravel` 是邻图居中需要的距离;还没量到宽度时用整页。
     static func presentedTranslation(
         raw: CGFloat,
         viewportWidth: CGFloat,
         hasNext: Bool,
-        hasPrevious: Bool
+        hasPrevious: Bool,
+        nextTravel: CGFloat? = nil,
+        previousTravel: CGFloat? = nil
     ) -> CGFloat {
         guard viewportWidth > 0, raw != 0 else { return 0 }
-        let travel = viewportWidth + pageGap
+        let forward = max(1, nextTravel ?? (viewportWidth + pageGap))
+        let backward = max(1, previousTravel ?? (viewportWidth + pageGap))
         if raw < 0 {
-            return hasNext ? max(raw, -travel) : rubberBand(raw, dimension: viewportWidth)
+            return hasNext ? max(raw, -forward) : rubberBand(raw, dimension: viewportWidth)
         }
-        return hasPrevious ? min(raw, travel) : rubberBand(raw, dimension: viewportWidth)
+        return hasPrevious ? min(raw, backward) : rubberBand(raw, dimension: viewportWidth)
     }
 
     /// 系统滚动的橡皮筋。`dimension` 用视口宽度,系数 0.55。越拉越沉,但不会一下子顶死。

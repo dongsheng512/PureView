@@ -40,7 +40,9 @@ final class FolderStore {
     private(set) var roots: [FolderNode] = []
     var selectedFolderID: FolderNode.ID?
 
-    private(set) var images: [ImageFile] = []
+    private(set) var images: [ImageFile] = [] {
+        didSet { rebuildVisibleImages() }
+    }
     var selectedImageID: ImageFile.ID?
 
     var imageLoading = false
@@ -156,6 +158,8 @@ final class FolderStore {
                 isSlideshowActive = false
                 isSlideshowPaused = false
                 slideshowGeneration += 1
+                slideshowQueue.removeAll()
+                updateSlideshowSleepAssertion()
             }
         }
     }
@@ -182,6 +186,24 @@ final class FolderStore {
     /// 传次数而不是递增 token:纯净模式/普通模式是两个画布实例,切换时新画布
     /// 按「次数 - 已应用次数」补齐差值,才能重放完整角度(token 只能重放一刀)。
     private(set) var rotationCount = 0
+    /// 单图内容被覆盖写回磁盘后的修订号(key 已 standardized),用于触发缩略图重新解码。
+    private(set) var imageRevisions: [URL: Int] = [:]
+
+    func imageRevision(for url: URL) -> Int {
+        imageRevisions[standardized(url)] ?? 0
+    }
+
+    /// 覆盖原图成功后调用:失效缩略图与显示缓存,刷新缩略图修订号,并归零显示旋转态。
+    func didOverwriteImage(_ url: URL) {
+        let key = standardized(url)
+        ThumbnailProvider.shared.invalidate(url: key)
+        DisplayImageCache.shared.invalidate(url: key)
+        imageRevisions[key, default: 0] += 1
+        if let sel = selectedImageID, standardized(sel) == key {
+            rotationCount = 0
+            isDisplayRotated = false
+        }
+    }
     /// 最近一次选图的步进方向:+1 向后,-1 向前,0 点选/无变化
     private(set) var lastStepDirection = 0
 
@@ -195,7 +217,31 @@ final class FolderStore {
     private(set) var isSlideshowPaused = false
     /// 播放间隔(偏好;MainContentView 把 @AppStorage 的变更同步进来)
     var slideshowInterval = SlideShowInterval.load()
+    /// 随机播放开关
+    var slideshowShuffle = false {
+        didSet {
+            guard oldValue != slideshowShuffle else { return }
+            if slideshowShuffle {
+                rebuildSlideshowQueue()
+            } else {
+                slideshowQueue.removeAll()
+            }
+            if isSlideshowActive, !isSlideshowPaused {
+                prefetchNextSlideshowImage()
+            }
+        }
+    }
+    /// 循环播放开关(幻灯片独立于全局翻页循环)
+    var slideshowLoop = true
+    /// 动态缓动缩放开关(Ken Burns)
+    var slideshowKenBurns = false
+    /// 本轮倒计时起点与令牌(供 HUD 圆环进度条平滑渲染)
+    private(set) var slideshowTickStart = Date()
+    private(set) var slideshowTickToken = 0
     private var slideshowGeneration = 0
+    private var slideshowQueue: [ImageFile.ID] = []
+    /// 播放期间防止屏幕息屏的系统活动令牌
+    private var slideshowSleepActivity: NSObjectProtocol?
 
     /// 菜单/HUD 的开关入口:未开启则开始,已开启则在暂停/继续间切换
     func toggleSlideshow() {
@@ -203,6 +249,7 @@ final class FolderStore {
             isSlideshowPaused.toggle()
             if isSlideshowPaused {
                 slideshowGeneration += 1
+                updateSlideshowSleepAssertion()
             } else {
                 scheduleSlideshowTick()
             }
@@ -212,9 +259,10 @@ final class FolderStore {
     }
 
     func startSlideshow() {
-        guard currentImage != nil, images.count > 1 else { return }
+        guard currentImage != nil, visibleImages.count > 1 else { return }
         isSlideshowActive = true
         isSlideshowPaused = false
+        if slideshowShuffle { rebuildSlideshowQueue() }
         if !isImmersive { toggleImmersive() }
         scheduleSlideshowTick()
     }
@@ -225,6 +273,8 @@ final class FolderStore {
         isSlideshowActive = false
         isSlideshowPaused = false
         slideshowGeneration += 1
+        slideshowQueue.removeAll()
+        updateSlideshowSleepAssertion()
         if isImmersive { toggleImmersive() }
     }
 
@@ -234,9 +284,126 @@ final class FolderStore {
         scheduleSlideshowTick()
     }
 
+    /// HUD 进度条跳转至指定可见下标，并在播放中重置倒计时。
+    func jumpToVisibleIndex(_ index: Int) {
+        let list = visibleImages
+        guard index >= 0, index < list.count else { return }
+        let current = visibleIndex
+        guard index != current else { return }
+        let dir = index > current ? 1 : -1
+        lastStepDirection = dir
+        selectImage(list[index].id, direction: dir)
+        if slideshowShuffle {
+            slideshowQueue.removeAll { $0 == list[index].id }
+        }
+        rescheduleSlideshowAfterStep()
+    }
+
+    /// 幻灯片自动前进一张（支持随机队列与独立循环开关）。
+    func advanceSlideshow() {
+        let list = visibleImages
+        guard list.count > 1 else {
+            pauseSlideshow()
+            return
+        }
+        if slideshowShuffle {
+            let validIDs = Set(list.map(\.id))
+            slideshowQueue.removeAll { !validIDs.contains($0) || $0 == selectedImageID }
+            if slideshowQueue.isEmpty {
+                if slideshowLoop {
+                    rebuildSlideshowQueue()
+                } else {
+                    pauseSlideshow()
+                    return
+                }
+            }
+            guard let nextID = slideshowQueue.first else {
+                pauseSlideshow()
+                return
+            }
+            slideshowQueue.removeFirst()
+            lastStepDirection = 1
+            selectImage(nextID, direction: 1)
+            rescheduleSlideshowAfterStep()
+            return
+        }
+
+        let current = visibleIndex
+        guard let idx = ImageNavigation.nextIndex(
+            current: current, count: list.count, delta: 1, wrap: slideshowLoop
+        ), idx != current else {
+            pauseSlideshow()
+            return
+        }
+        lastStepDirection = 1
+        selectImage(list[idx].id, direction: 1)
+        rescheduleSlideshowAfterStep()
+    }
+
+    private func pauseSlideshow() {
+        isSlideshowPaused = true
+        slideshowGeneration += 1
+        updateSlideshowSleepAssertion()
+    }
+
+    private func rebuildSlideshowQueue() {
+        let currentID = selectedImageID
+        var ids = visibleImages.map(\.id).filter { $0 != currentID }
+        ids.shuffle()
+        slideshowQueue = ids
+    }
+
+    private func updateSlideshowSleepAssertion() {
+        let shouldHold = isSlideshowActive && !isSlideshowPaused
+        if shouldHold {
+            if slideshowSleepActivity == nil {
+                slideshowSleepActivity = ProcessInfo.processInfo.beginActivity(
+                    options: [.idleDisplaySleepDisabled, .userInitiated],
+                    reason: "PureView Slideshow Playback"
+                )
+            }
+        } else if let activity = slideshowSleepActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            slideshowSleepActivity = nil
+        }
+    }
+
+    /// 预解码下一张幻灯片目标图（兼容随机队列），确保高像素照片到点零延迟切换。
+    private func prefetchNextSlideshowImage() {
+        let list = visibleImages
+        guard list.count > 1 else { return }
+        let nextURL: URL?
+        if slideshowShuffle {
+            if let nextID = slideshowQueue.first,
+               let file = list.first(where: { $0.id == nextID }) {
+                nextURL = file.url
+            } else {
+                nextURL = nil
+            }
+        } else {
+            let current = visibleIndex
+            if let idx = ImageNavigation.nextIndex(
+                current: current, count: list.count, delta: 1, wrap: slideshowLoop
+            ), idx != current {
+                nextURL = list[idx].url
+            } else {
+                nextURL = nil
+            }
+        }
+        guard let nextURL else { return }
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let scale = screen?.backingScaleFactor ?? 2
+        let maxSide = max(screen?.frame.width ?? 1920, screen?.frame.height ?? 1080) * scale
+        ImageLoader.prefetchDisplay(url: nextURL, maxPixelSize: max(1800, maxSide))
+    }
+
     private func scheduleSlideshowTick() {
         guard isSlideshowActive, !isSlideshowPaused else { return }
+        updateSlideshowSleepAssertion()
         slideshowGeneration += 1
+        slideshowTickStart = Date()
+        slideshowTickToken += 1
+        prefetchNextSlideshowImage()
         let gen = slideshowGeneration
         let seconds = slideshowInterval.seconds
         Task { [weak self] in
@@ -245,16 +412,32 @@ final class FolderStore {
                   self.isSlideshowActive, !self.isSlideshowPaused else { return }
             // 模态面板(裁切/打印)打开时到点:自动暂停,避免在面板背后切图
             guard !self.isModalPresented else {
-                self.isSlideshowPaused = true
+                self.pauseSlideshow()
                 return
             }
-            self.step(1)
+            self.advanceSlideshow()
         }
     }
 
     func requestRotate() {
         guard currentImage != nil else { return }
         rotationCount += 1
+    }
+
+    /// 清除当前图的临时显示旋转(恢复文件原始方向)
+    func resetDisplayRotation() {
+        guard currentImage != nil, (rotationCount != 0 || isDisplayRotated) else { return }
+        rotationCount = 0
+        isDisplayRotated = false
+    }
+
+    /// 聚焦缩略图过滤框通道(⌘F)
+    private(set) var filterFocusToken = 0
+
+    func requestFocusFilter() {
+        guard !images.isEmpty, !isImmersive, !isModalPresented else { return }
+        if !sidebarVisible { sidebarVisible = true }
+        filterFocusToken += 1
     }
 
     /// 缩放指令通道(token 递增表示新指令)
@@ -326,7 +509,9 @@ final class FolderStore {
     /// **刻意不落盘**:它是"当下找一张图"的临时手段,粘到下次启动只会让人困惑。
     /// 只能通过 `setFilter` 改 —— 改过滤词必须顺手把被筛掉的选中项挪回来,
     /// 不能指望每个调用方都记得。
-    private(set) var filterText = ""
+    private(set) var filterText = "" {
+        didSet { rebuildVisibleImages() }
+    }
 
     /// 缩略图过滤框是否正在输入。
     ///
@@ -335,13 +520,15 @@ final class FolderStore {
     /// 否则用户敲 "i" 会切信息面板、敲 "c" 会进裁切、⌘⌫ 会去废纸篓删文件。
     var isTextInputFocused = false
 
-    /// 网格实际展示的序列(= `images` 按过滤词筛过)。
+    /// 网格实际展示的序列(= `images` 按过滤词筛过)。缓存存储属性,避免单次渲染期重复过滤。
     ///
     /// `images` 本身**绝不动**:它同时喂着文件夹计数、隐藏/删除、排序与选中记忆,
     /// 就地改写会连累一圈。浏览类操作(上/下一张、预解码、幻灯片、拼版打印)
     /// 一律改走这里。
-    var visibleImages: [ImageFile] {
-        ImageFilter.apply(to: images, query: filterText)
+    private(set) var visibleImages: [ImageFile] = []
+
+    private func rebuildVisibleImages() {
+        visibleImages = ImageFilter.apply(to: images, query: filterText)
     }
 
     /// 当前选中项在 `visibleImages` 中的位置;不在其中(或没选中)返回 -1。
@@ -765,7 +952,7 @@ final class FolderStore {
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
-            eventMask: [.write, .delete, .rename, .extend, .attrib],
+            eventMask: [.write, .delete, .rename, .extend],
             queue: .main
         )
         source.setEventHandler { [weak self] in
@@ -803,8 +990,14 @@ final class FolderStore {
     func ensureChildren(of node: FolderNode) {
         guard !node.childrenLoaded else { return }
         node.childrenLoaded = true
-        node.children = ImageDiscovery.subfolders(in: node.url)
-            .map { FolderNode(url: $0, depth: node.depth + 1) }
+        let url = node.url
+        let nextDepth = node.depth + 1
+        Task { @MainActor in
+            let subfolders = await Task.detached(priority: .userInitiated) {
+                ImageDiscovery.subfolders(in: url)
+            }.value
+            node.children = subfolders.map { FolderNode(url: $0, depth: nextDepth) }
+        }
     }
 
     func removeRoot(id: FolderNode.ID) {
@@ -816,7 +1009,11 @@ final class FolderStore {
         selectedFolderID = nil
         images = []
         selectedImageID = nil
-        if let first = roots.first { selectFolder(first) }
+        if let first = roots.first {
+            selectFolder(first)
+        } else {
+            stopFolderWatch()
+        }
     }
 
     func node(id: FolderNode.ID?) -> FolderNode? {
@@ -901,15 +1098,23 @@ final class FolderStore {
 
     // MARK: - 缩略图右键操作(复制 / 隐藏 / 删除)
 
-    /// 复制图片:同时写入文件引用与图像数据
-    /// (Finder 粘贴得到文件拷贝,富文本/聊天应用粘贴得到图像)
+    /// 复制图片:先同步写入文件引用(Finder 粘贴立即可用),再后台异步补写图像数据
+    /// (富文本/聊天应用粘贴得到图像),避免 40MP 大图在主线程同步转 TIFF 造成卡顿。
     func copyImageToPasteboard(_ id: ImageFile.ID) {
         let pasteboard = NSPasteboard.general
-        pasteboard.declareTypes([.fileURL, .tiff], owner: nil)
-        (id as NSURL).write(to: pasteboard)
-        guard let image = NSImage(contentsOf: id),
-              let tiff = image.tiffRepresentation else { return }
-        pasteboard.setData(tiff, forType: .tiff)
+        pasteboard.clearContents()
+        pasteboard.writeObjects([id as NSURL])
+        let expectedChangeCount = pasteboard.changeCount
+        Task.detached(priority: .userInitiated) {
+            guard let image = NSImage(contentsOf: id),
+                  let tiff = image.tiffRepresentation else { return }
+            await MainActor.run {
+                let pb = NSPasteboard.general
+                guard pb.changeCount == expectedChangeCount else { return }
+                pb.addTypes([.tiff], owner: nil)
+                pb.setData(tiff, forType: .tiff)
+            }
+        }
     }
 
     // MARK: - 浏览态单图操作(「图片」菜单 D2 快捷键的落点)

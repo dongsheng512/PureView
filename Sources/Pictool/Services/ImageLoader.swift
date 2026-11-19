@@ -214,6 +214,14 @@ final class DisplayImageCache: @unchecked Sendable {
         cancelAll()
     }
 
+    /// 源文件被覆盖写回后移除旧缓存,避免退出编辑回到画布时继续命中修改前的位图。
+    func invalidate(url: URL) {
+        lock.lock()
+        cache.removeObject(forKey: url as NSURL)
+        cache.removeObject(forKey: url.standardizedFileURL as NSURL)
+        lock.unlock()
+    }
+
     func cached(url: URL, requestedMaxPixel: CGFloat) -> (image: NSImage, facts: ImageLoader.SourceFacts)? {
         guard let rec = cache.object(forKey: url as NSURL) else { return nil }
         guard ImageLoader.cachedSatisfies(

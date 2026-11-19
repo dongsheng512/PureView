@@ -2,16 +2,6 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-/// 兼容入口:裁切快捷键停在裁切工具。实现见 `EditView`。
-struct CropView: View {
-    let file: ImageFile
-    var initialQuarterTurns = 0
-
-    var body: some View {
-        EditView(file: file, initialQuarterTurns: initialQuarterTurns, initialTool: .crop)
-    }
-}
-
 // MARK: - 选区画布
 
 struct CropCanvas: View {
@@ -40,6 +30,9 @@ struct CropCanvas: View {
     var onEditText: ((UUID) -> Void)?
     /// 图片描边色。画布与顶栏同一底色后,靠这一圈极淡的描边把图片范围交代出来。
     var imageBorder: Color = .clear
+    /// 拉直滑块拖动中的实时角度与状态:走 GPU rotationEffect + coverScale 60fps 预览,松手再烘焙位图。
+    var liveStraightenDegrees: Double = 0
+    var isStraightening: Bool = false
 
     @State private var dragBaseline: CGRect?
     @State private var dragStartPoint: CGPoint?
@@ -53,10 +46,16 @@ struct CropCanvas: View {
             let fit = fittedRect(container: geo.size)
             let minNorm = max(0.02, 18 / max(fit.width, 1))
             let shown = displayRect(fit: fit)
+            let liveScale = isStraightening
+                ? CropTransform.coverScale(degrees: liveStraightenDegrees, width: fit.width, height: fit.height)
+                : 1
             ZStack(alignment: .topLeading) {
                 Image(nsImage: image)
                     .resizable()
+                    .scaleEffect(liveScale)
+                    .rotationEffect(.degrees(isStraightening ? liveStraightenDegrees : 0))
                     .frame(width: fit.width, height: fit.height)
+                    .clipped()
                     .offset(x: fit.minX, y: fit.minY)
                     .allowsHitTesting(false)
 
@@ -82,8 +81,13 @@ struct CropCanvas: View {
                 // 水印按裁切输出画幅布局(与导出一致),落在选框内
                 WatermarkStampLayer(settings: watermark, frame: shown)
 
-                thirds(rect: shown)
-                    .allowsHitTesting(false)
+                if isStraightening {
+                    straightenGrid(rect: shown)
+                        .allowsHitTesting(false)
+                } else {
+                    thirds(rect: shown)
+                        .allowsHitTesting(false)
+                }
 
                 Rectangle()
                     .strokeBorder(Color.white, lineWidth: 1.5)
@@ -202,9 +206,13 @@ struct CropCanvas: View {
         let imageSize = image.size
         let normalizedBounds: CGRect?
         switch annotation.kind {
-        case let .text(anchor, content, sizeFraction, _):
+        case let .text(anchor, content, sizeFraction, _, _):
             normalizedBounds = MarkupGeometry.textHitRect(
                 anchor: anchor, content: content, sizeFraction: sizeFraction, imageSize: imageSize
+            )
+        case let .step(anchor, _, sizeFraction, _):
+            normalizedBounds = MarkupGeometry.stepHitRect(
+                anchor: anchor, sizeFraction: sizeFraction, imageSize: imageSize
             )
         case let .stroke(points, widthLevel, _, style):
             normalizedBounds = MarkupGeometry.strokeBounds(
@@ -214,7 +222,9 @@ struct CropCanvas: View {
             normalizedBounds = MarkupGeometry.strokeBounds(
                 points, widthFraction: MarkPalette.fraction(MarkPalette.mosaicWidths, level: widthLevel)
             )
-        case let .shape(kind, from, to, widthLevel, _):
+        case let .mosaicRect(from, to, _, _):
+            normalizedBounds = MarkupGeometry.standardizedRect(from: from, to: to)
+        case let .shape(kind, from, to, widthLevel, _, _):
             normalizedBounds = MarkupGeometry.shapeBounds(
                 kind: kind, from: from, to: to,
                 widthFraction: MarkPalette.fraction(MarkPalette.strokeWidths, level: widthLevel),
@@ -269,6 +279,32 @@ struct CropCanvas: View {
         }
         .fill(Color.black.opacity(0.5), style: FillStyle(eoFill: true))
         .allowsHitTesting(false)
+    }
+
+    /// 拉直时的精细水平/垂直对齐网格(8×8 细格 + 中线加亮)
+    private func straightenGrid(rect: CGRect) -> some View {
+        ZStack {
+            Path { path in
+                for i in 1..<8 where i != 4 {
+                    let frac = CGFloat(i) / 8
+                    let x = rect.minX + rect.width * frac
+                    let y = rect.minY + rect.height * frac
+                    path.move(to: CGPoint(x: x, y: rect.minY))
+                    path.addLine(to: CGPoint(x: x, y: rect.maxY))
+                    path.move(to: CGPoint(x: rect.minX, y: y))
+                    path.addLine(to: CGPoint(x: rect.maxX, y: y))
+                }
+            }
+            .stroke(Color.white.opacity(0.32), lineWidth: 0.5)
+
+            Path { path in
+                path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+                path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+                path.move(to: CGPoint(x: rect.minX, y: rect.midY))
+                path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+            }
+            .stroke(Color.white.opacity(0.75), lineWidth: 1)
+        }
     }
 
     private func displayRect(fit: CGRect) -> CGRect {
@@ -417,12 +453,29 @@ struct CanvasMouseCatcher: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if window != nil {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+            NotificationCenter.default.removeObserver(self, name: NSApplication.didResignActiveNotification, object: nil)
+            if let window {
                 installKeyMonitor()
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(resetSpacePanState),
+                    name: NSWindow.didResignKeyNotification, object: window
+                )
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(resetSpacePanState),
+                    name: NSApplication.didResignActiveNotification, object: nil
+                )
             } else {
-                spaceDown = false
+                resetSpacePanState()
                 removeKeyMonitor()
             }
+        }
+
+        @objc private func resetSpacePanState() {
+            guard spaceDown || panStart != nil else { return }
+            spaceDown = false
+            panStart = nil
+            window?.invalidateCursorRects(for: self)
         }
 
         /// 只观察不消费:空格按下态用于「按住空格拖拽平移」;草稿聚焦时 spacePanEnabled 关,不进平移态。
@@ -448,6 +501,7 @@ struct CanvasMouseCatcher: NSViewRepresentable {
         }
 
         deinit {
+            NotificationCenter.default.removeObserver(self)
             if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         }
 
@@ -456,7 +510,7 @@ struct CanvasMouseCatcher: NSViewRepresentable {
             if !trackingAreas.contains(where: { $0.owner === self }) {
                 addTrackingArea(NSTrackingArea(
                     rect: .zero,
-                    options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                    options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
                     owner: self
                 ))
             }
@@ -665,19 +719,9 @@ enum WindowMoveControl {
 struct WatermarkStampLayer: View {
     let settings: WatermarkSettings
     let frame: CGRect
+    @State private var asyncStamp: NSImage?
 
-    var body: some View {
-        if settings.hasContent, frame.width > 2, frame.height > 2, let image = stamp {
-            Image(nsImage: image)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: frame.width, height: frame.height)
-                .offset(x: frame.minX, y: frame.minY)
-                .allowsHitTesting(false)
-        }
-    }
-
-    private var stamp: NSImage? {
+    private var quantizedSize: (width: Int, height: Int) {
         // 量化尺寸,拖选框时不要每像素重烙一遍。
         // 关键:**两个方向共用一个缩放系数**。早先是各自夹到 1200,竖构图的裁切框
         // (如 300×1200)栅格会变成 600×1200,而 SwiftUI 侧按 frame 硬拉伸,
@@ -686,23 +730,59 @@ struct WatermarkStampLayer: View {
         let k = min(1, 1200 / max(frame.width * 2, frame.height * 2, 1))
         let width = max(grid, (frame.width * 2 * k / grid).rounded() * grid)
         let height = max(grid, (frame.height * 2 * k / grid).rounded() * grid)
-        let key = stampKey(width: Int(width), height: Int(height))
-        if let cached = Self.cache.object(forKey: key) { return cached }
-        guard let cg = WatermarkRenderer.overlay(
-            settings, canvasSize: CGSize(width: width, height: height), force: true
-        ) else { return nil }
-        let image = NSImage(cgImage: cg, size: NSSize(width: frame.width, height: frame.height))
-        Self.cache.setObject(image, forKey: key)
-        return image
+        return (Int(width), Int(height))
     }
 
-    private func stampKey(width: Int, height: Int) -> NSString {
-        "\(width)x\(height)|\(settings.enabled)|\(settings.text)|\(settings.useLogo)|\(settings.logoPath ?? "")|\(settings.position.rawValue)|\(settings.opacity)|\(settings.sizeFraction)|\(settings.tiled)|\(settings.tileSpacing)" as NSString
+    private var currentKey: String {
+        let q = quantizedSize
+        return "\(q.width)x\(q.height)|\(settings.enabled)|\(settings.text)|\(settings.useLogo)|\(settings.logoPath ?? "")|\(settings.position.rawValue)|\(settings.opacity)|\(settings.sizeFraction)|\(settings.tiled)|\(settings.tileSpacing)"
     }
 
-    private static let cache: NSCache<NSString, NSImage> = {
+    var body: some View {
+        let key = currentKey
+        let displayImage = Self.cache.object(forKey: key as NSString) ?? asyncStamp
+        Group {
+            if settings.hasContent, frame.width > 2, frame.height > 2, let image = displayImage {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: frame.width, height: frame.height)
+                    .offset(x: frame.minX, y: frame.minY)
+                    .allowsHitTesting(false)
+            }
+        }
+        .task(id: key) {
+            guard settings.hasContent, frame.width > 2, frame.height > 2 else {
+                asyncStamp = nil
+                return
+            }
+            let nsKey = key as NSString
+            if let hit = Self.cache.object(forKey: nsKey) {
+                asyncStamp = hit
+                return
+            }
+            let q = quantizedSize
+            let targetSettings = settings
+            let displaySize = NSSize(width: frame.width, height: frame.height)
+            let generated: CGImage? = await Task.detached(priority: .userInitiated) {
+                WatermarkRenderer.overlay(
+                    targetSettings,
+                    canvasSize: CGSize(width: q.width, height: q.height),
+                    force: true
+                )
+            }.value
+            guard !Task.isCancelled, let cg = generated else { return }
+            let img = NSImage(cgImage: cg, size: displaySize)
+            let cost = cg.bytesPerRow * cg.height
+            Self.cache.setObject(img, forKey: nsKey, cost: max(cost, 1))
+            asyncStamp = img
+        }
+    }
+
+    nonisolated(unsafe) private static let cache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
         cache.countLimit = 24
+        cache.totalCostLimit = 24 * 1024 * 1024
         return cache
     }()
 }
