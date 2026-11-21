@@ -3243,4 +3243,36 @@ final class OptimizationRegressionTests: XCTestCase {
         store.endSlideshow()
         XCTAssertFalse(store.isSlideshowActive)
     }
+
+    /// 回归测试：NSPageController 从非空列表切到空列表（如点击「加载同目录所有图片」、切文件夹、过滤为空）
+    /// 时绝不能对 arrangedObjects 赋空数组引发 -[NSPageController setSelectedIndex:] 闪退。
+    @MainActor
+    func testSyncPageControllerDoesNotCrashOnEmptyList() {
+        let f1 = ImageFile(id: URL(fileURLWithPath: "/tmp/pictool-a.jpg"))
+        let f2 = ImageFile(id: URL(fileURLWithPath: "/tmp/pictool-b.jpg"))
+        let canvas = ImageViewCanvas(
+            file: f1,
+            files: [f1],
+            neighbors: ImageNeighbors(),
+            background: .dark,
+            openZoomMode: .fit,
+            transition: .slide,
+            zoomRequest: nil,
+            rotationCount: 0,
+            stepDirection: 0,
+            onLoadingChange: { _ in },
+            onScaleChange: { _ in },
+            onImageInfo: { _ in },
+            onRotationChange: { _ in },
+            onStep: { _ in ImageNeighbors() }
+        )
+        let coord = canvas.makeCoordinator()
+        coord.syncPageController(files: [f1], currentFile: f1)
+        XCTAssertEqual(coord.pageController.selectedIndex, 0)
+
+        // 列表清空后再恢复为多图：不应抛 NSInternalInconsistencyException
+        coord.syncPageController(files: [], currentFile: nil)
+        coord.syncPageController(files: [f1, f2], currentFile: f2)
+        XCTAssertEqual(coord.pageController.selectedIndex, 1)
+    }
 }

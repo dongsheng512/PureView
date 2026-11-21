@@ -95,11 +95,15 @@ extension ImageViewCanvas.Coordinator {
         let listChanged = urls != arrangedURLs
         if listChanged {
             arrangedURLs = urls
-            if !isLivePaging {
+            // AppKit 的 NSPageController 在已有 selectedIndex >= 0 时赋空数组会直接抛
+            // NSInternalInconsistencyException (-[NSPageController setSelectedIndex:]) 闪退；
+            // 空列表期间不把 [] 写入 arrangedObjects，等有图时再同步。
+            if !isLivePaging, !urls.isEmpty {
                 pageController.arrangedObjects = urls
             }
         }
-        guard let targetURL = currentFile?.url,
+        guard !urls.isEmpty,
+              let targetURL = currentFile?.url,
               let targetIndex = urls.firstIndex(of: targetURL) else {
             return
         }
@@ -203,8 +207,8 @@ extension ImageViewCanvas.Coordinator {
     func pageControllerDidEndLiveTransition(_ pageController: NSPageController) {
         pageController.completeTransition()
         isLivePaging = false
-        // 如果过渡期间列表变更过,此时补同步
-        if arrangedURLs.count != pageController.arrangedObjects.count {
+        // 如果过渡期间列表变更过,此时补同步(避免向 NSPageController 赋空数组引发异常)
+        if !arrangedURLs.isEmpty, arrangedURLs.count != pageController.arrangedObjects.count {
             pageController.arrangedObjects = arrangedURLs
             if let cur = currentURL, let idx = arrangedURLs.firstIndex(of: cur) {
                 pageController.selectedIndex = idx

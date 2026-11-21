@@ -735,6 +735,7 @@ final class FolderStore {
         if filteredAll.count > unique.count {
             let node = ensureRoot(firstFolder)
             selectedFolderID = node.id
+            listedFolder = standardized(firstFolder)
             isSingleImageMode = true
             singleImageSourceFolder = firstFolder
             ThumbnailProvider.shared.cancelAll()
